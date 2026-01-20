@@ -528,17 +528,17 @@ function getWebviewHtml() {
           <div class="row">
             <div>
               <div class="muted">Workspace</div>
-              <div id="workspace">—</div>
+              <div id="workspace">None</div>
             </div>
             <div>
               <div class="muted">Project</div>
-              <div id="project">—</div>
+              <div id="project">None</div>
             </div>
           </div>
           <div class="row">
             <div>
               <div class="muted">Task</div>
-              <div id="task">—</div>
+              <div id="task">None</div>
             </div>
             <div>
               <div class="muted">Tags</div>
@@ -548,7 +548,7 @@ function getWebviewHtml() {
           <div class="row">
             <div>
               <div class="muted">Description</div>
-              <div id="description">—</div>
+              <div id="description">None</div>
             </div>
           </div>
           <div class="actions">
@@ -566,7 +566,7 @@ function getWebviewHtml() {
           const apiKeyButton = document.getElementById("apiKey");
 
           function setText(id, value) {
-            document.getElementById(id).textContent = value || "—";
+            document.getElementById(id).textContent = value || "None";
           }
 
           function setTags(tags) {
@@ -574,7 +574,7 @@ function getWebviewHtml() {
             list.innerHTML = "";
             if (!tags || !tags.length) {
               const item = document.createElement("li");
-              item.textContent = "—";
+              item.textContent = "None";
               list.appendChild(item);
               return;
             }
@@ -593,7 +593,10 @@ function getWebviewHtml() {
           window.addEventListener("message", (event) => {
             const state = event.data;
             if (!state || state.type !== "state") return;
-            setText("repo", state.repo ? \`\${state.repo} \${state.branch ? "• " + state.branch : ""}\` : "No repo detected");
+            const repoText = state.repo
+              ? state.repo + (state.branch ? " - " + state.branch : "")
+              : "No repo detected";
+            setText("repo", repoText);
             setText("workspace", state.workspace);
             setText("project", state.project);
             setText("task", state.task);
@@ -611,16 +614,19 @@ function getWebviewHtml() {
   `;
 }
 
+
 function activate(context) {
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBar.command = "clockify.startTimer";
   context.subscriptions.push(statusBar);
   let statusInterval = null;
-  let sidebarView = null;
+  const sidebarViews = new Map();
 
   const viewProvider = {
     resolveWebviewView(view) {
-      sidebarView = view;
+      const viewType = view.viewType || "clockifyView";
+      sidebarViews.set(viewType, view);
+      view.onDidDispose(() => sidebarViews.delete(viewType));
       view.webview.options = { enableScripts: true };
       view.webview.html = getWebviewHtml();
 
@@ -645,16 +651,20 @@ function activate(context) {
     }
   };
 
-  context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider("clockifyView", viewProvider)
-  );
+  ["clockifyView", "clockifyViewSecondary"].forEach((viewType) => {
+    context.subscriptions.push(
+      vscode.window.registerWebviewViewProvider(viewType, viewProvider)
+    );
+  });
 
   async function updateSidebar() {
-    if (!sidebarView) {
+    if (!sidebarViews.size) {
       return;
     }
     const state = await buildSidebarState(context);
-    sidebarView.webview.postMessage({ type: "state", ...state });
+    sidebarViews.forEach((view) => {
+      view.webview.postMessage({ type: "state", ...state });
+    });
   }
 
   function updateStatusBar() {

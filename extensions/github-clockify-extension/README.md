@@ -27,10 +27,8 @@ Chrome extension that adds Clockify controls to GitHub issue and PR pages.
 ## Configuration
 - Options page:
   - API Key
-  - Repo mappings (optional)
-  - Label-to-tag map (optional)
+  - Label-to-tag map (optional, tag IDs)
   - Quick-start toggle
 
 ## Auto-match
-- Repo mappings: map `owner/name` to project/task ids
-- Label-to-tag map: map issue labels to Clockify tag names (matched by normalized name)
+- Label-to-tag map: map issue labels to Clockify tag IDs

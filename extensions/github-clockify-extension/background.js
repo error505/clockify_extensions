@@ -125,7 +125,8 @@ async function stopTimer() {
   const storage = await chrome.storage.sync.get({
     lastTimeEntryId: "",
     lastTimeEntryWorkspaceId: "",
-    lastTimeEntryStart: ""
+    lastTimeEntryStart: "",
+    lastTimeEntryDescription: ""
   });
   if (!settings.apiKey || !settings.workspaceId) {
     throw new Error("Missing API key or workspace id. Open settings.");
@@ -139,8 +140,9 @@ async function stopTimer() {
 
   const endIso = new Date().toISOString();
   let startIso = storage.lastTimeEntryStart;
+  let runningEntry = null;
   try {
-    const runningEntry = await fetchRunningEntry(settings.apiKey, workspaceId);
+    runningEntry = await fetchRunningEntry(settings.apiKey, workspaceId);
     if (runningEntry && runningEntry.start) {
       startIso = runningEntry.start;
     }
@@ -164,6 +166,12 @@ async function stopTimer() {
     if (!startIso) {
       throw new Error("Missing start time for running entry.");
     }
+    const putBody = buildStopPutBody({
+      start: startIso,
+      end: endIso,
+      runningEntry,
+      fallbackDescription: storage.lastTimeEntryDescription
+    });
     const putResponse = await fetch(
       `${API_BASE}/workspaces/${workspaceId}/time-entries/${timeEntryId}`,
       {
@@ -172,7 +180,7 @@ async function stopTimer() {
           "Content-Type": "application/json",
           "X-Api-Key": settings.apiKey
         },
-        body: JSON.stringify({ start: startIso, end: endIso })
+        body: JSON.stringify(putBody)
       }
     );
     text = await putResponse.text();
@@ -189,6 +197,30 @@ async function stopTimer() {
     lastTimeEntryDescription: ""
   });
   return text ? JSON.parse(text) : {};
+}
+
+function buildStopPutBody({ start, end, runningEntry, fallbackDescription }) {
+  const body = {
+    start,
+    end,
+    description:
+      (runningEntry && runningEntry.description) || fallbackDescription || ""
+  };
+
+  if (runningEntry && runningEntry.projectId) {
+    body.projectId = runningEntry.projectId;
+  }
+  if (runningEntry && runningEntry.taskId) {
+    body.taskId = runningEntry.taskId;
+  }
+  if (runningEntry && Array.isArray(runningEntry.tagIds) && runningEntry.tagIds.length) {
+    body.tagIds = runningEntry.tagIds;
+  }
+  if (runningEntry && typeof runningEntry.billable === "boolean") {
+    body.billable = runningEntry.billable;
+  }
+
+  return body;
 }
 
 function buildTimeEntryBody({ description, projectId, taskId, tagIds }) {
