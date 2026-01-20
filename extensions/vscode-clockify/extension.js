@@ -74,6 +74,22 @@ function clockifyRequest(apiKey, method, path, body) {
   });
 }
 
+function formatElapsed(startIso) {
+  const startMs = Date.parse(startIso);
+  if (!startMs) {
+    return "00:00";
+  }
+  const diff = Date.now() - startMs;
+  const totalSeconds = Math.max(0, Math.floor(diff / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
 function fetchWorkspaces(apiKey) {
   return clockifyRequest(apiKey, "GET", "/workspaces");
 }
@@ -141,6 +157,15 @@ async function pickFromList(items, options) {
 }
 
 async function startTimer(context) {
+  const config = vscode.workspace.getConfiguration("clockify");
+  const quickStart = config.get("quickStartWithLastSelection", false);
+  const skipPickIfSingle = config.get("skipPickIfSingle", true);
+  const defaultWorkspaceId =
+    config.get("defaultWorkspaceId", "") || config.get("workspaceId", "");
+  const defaultProjectId = config.get("defaultProjectId", "");
+  const defaultTaskId = config.get("defaultTaskId", "");
+  const defaultTagIds = config.get("defaultTagIds", []);
+
   const apiKey = await getApiKey(context);
   if (!apiKey) {
     vscode.window.showErrorMessage("Clockify API key is required.");
@@ -150,6 +175,31 @@ async function startTimer(context) {
   const repoContext = await getRepoContext();
   const selections = await getRepoSelections(context);
   const savedSelection = selections[repoContext.repo] || null;
+
+  if (quickStart && savedSelection && savedSelection.workspaceId) {
+    try {
+      const startIso = new Date().toISOString();
+      const entry = await clockifyRequest(
+        apiKey,
+        "POST",
+        `/workspaces/${savedSelection.workspaceId}/time-entries`,
+        {
+          start: startIso,
+          description: savedSelection.description || `Working on ${repoContext.repo}`,
+          projectId: savedSelection.projectId || undefined,
+          taskId: savedSelection.taskId || undefined,
+          tagIds: Array.isArray(savedSelection.tagIds) ? savedSelection.tagIds : undefined
+        }
+      );
+      await context.globalState.update("clockify.lastTimeEntryId", entry.id || "running");
+      await context.globalState.update("clockify.lastWorkspaceId", savedSelection.workspaceId);
+      await context.globalState.update("clockify.lastTimeEntryStart", startIso);
+      vscode.window.showInformationMessage("Clockify timer started.");
+    } catch (error) {
+      vscode.window.showErrorMessage(error.message || "Clockify start failed.");
+    }
+    return;
+  }
 
   let workspaces;
   try {
@@ -163,12 +213,12 @@ async function startTimer(context) {
     return;
   }
 
-  let workspaceId = "";
+  let workspaceId = defaultWorkspaceId;
   if (savedSelection && savedSelection.workspaceId) {
     workspaceId = savedSelection.workspaceId;
   }
   if (!workspaceId) {
-    if (workspaces.length === 1) {
+    if (workspaces.length === 1 && skipPickIfSingle) {
       workspaceId = workspaces[0].id;
     } else {
       const selectedWorkspace = await pickFromList(workspaces, {
@@ -181,9 +231,11 @@ async function startTimer(context) {
     }
   }
 
-  let projectId = savedSelection ? savedSelection.projectId : "";
-  let taskId = savedSelection ? savedSelection.taskId : "";
-  let tagIds = savedSelection && Array.isArray(savedSelection.tagIds) ? savedSelection.tagIds : [];
+  let projectId = savedSelection ? savedSelection.projectId : defaultProjectId;
+  let taskId = savedSelection ? savedSelection.taskId : defaultTaskId;
+  let tagIds = savedSelection && Array.isArray(savedSelection.tagIds)
+    ? savedSelection.tagIds
+    : defaultTagIds;
 
   let projects = [];
   try {
@@ -193,29 +245,33 @@ async function startTimer(context) {
     return;
   }
 
-  const selectedProject = await pickFromList(projects, {
-    placeholder: "Select a project (optional)",
-    emptyLabel: "No project"
-  });
-  if (!selectedProject && !projectId) {
-    return;
+  if (projects.length) {
+    const selectedProject = await pickFromList(projects, {
+      placeholder: "Select a project (optional)",
+      emptyLabel: "No project"
+    });
+    if (!selectedProject && !projectId) {
+      return;
+    }
+    projectId = selectedProject ? selectedProject.id : projectId;
   }
-  projectId = selectedProject ? selectedProject.id : projectId;
 
-  let tasks = [];
   if (projectId) {
+    let tasks = [];
     try {
       tasks = await fetchTasks(apiKey, workspaceId, projectId);
     } catch (error) {
       vscode.window.showErrorMessage(error.message || "Failed to load tasks.");
       return;
     }
-    const selectedTask = await pickFromList(tasks, {
-      placeholder: "Select a task (optional)",
-      emptyLabel: "No task"
-    });
-    if (selectedTask) {
-      taskId = selectedTask.id;
+    if (tasks.length) {
+      const selectedTask = await pickFromList(tasks, {
+        placeholder: "Select a task (optional)",
+        emptyLabel: "No task"
+      });
+      if (selectedTask) {
+        taskId = selectedTask.id;
+      }
     }
   } else {
     taskId = "";
@@ -249,8 +305,9 @@ async function startTimer(context) {
       ignoreFocusOut: true
     })) || defaultDescription;
 
+  const startIso = new Date().toISOString();
   const body = {
-    start: new Date().toISOString(),
+    start: startIso,
     description
   };
   if (projectId) {
@@ -272,6 +329,7 @@ async function startTimer(context) {
     );
     await context.globalState.update("clockify.lastTimeEntryId", entry.id);
     await context.globalState.update("clockify.lastWorkspaceId", workspaceId);
+    await context.globalState.update("clockify.lastTimeEntryStart", startIso);
     await saveRepoSelection(context, repoContext.repo, {
       workspaceId,
       projectId,
@@ -310,6 +368,7 @@ async function stopTimer(context) {
       { end: new Date().toISOString() }
     );
     await context.globalState.update("clockify.lastTimeEntryId", "");
+    await context.globalState.update("clockify.lastTimeEntryStart", "");
     vscode.window.showInformationMessage("Clockify timer stopped.");
   } catch (error) {
     vscode.window.showErrorMessage(error.message || "Clockify stop failed.");
@@ -332,17 +391,27 @@ function activate(context) {
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBar.command = "clockify.startTimer";
   context.subscriptions.push(statusBar);
+  let statusInterval = null;
 
   function updateStatusBar() {
     const entryId = context.globalState.get("clockify.lastTimeEntryId");
+    const entryStart = context.globalState.get("clockify.lastTimeEntryStart");
     if (entryId) {
-      statusBar.text = "$(watch) Clockify: Running";
+      const elapsed = formatElapsed(entryStart);
+      statusBar.text = `$(watch) Clockify: ${elapsed}`;
       statusBar.tooltip = "Stop Clockify timer";
       statusBar.command = "clockify.stopTimer";
+      if (!statusInterval) {
+        statusInterval = setInterval(updateStatusBar, 1000);
+      }
     } else {
       statusBar.text = "$(watch) Clockify: Idle";
       statusBar.tooltip = "Start Clockify timer";
       statusBar.command = "clockify.startTimer";
+      if (statusInterval) {
+        clearInterval(statusInterval);
+        statusInterval = null;
+      }
     }
     statusBar.show();
   }
@@ -361,6 +430,11 @@ function activate(context) {
   );
   context.subscriptions.push(
     vscode.commands.registerCommand("clockify.setApiKey", () => setApiKey(context))
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("clockify.openSettings", () =>
+      vscode.commands.executeCommand("workbench.action.openSettings", "clockify")
+    )
   );
 
   updateStatusBar();

@@ -8,7 +8,8 @@ const fields = {
   defaultTaskId: document.getElementById("defaultTaskId"),
   defaultTagIds: document.getElementById("defaultTagIds"),
   repoMappings: document.getElementById("repoMappings"),
-  labelTagMap: document.getElementById("labelTagMap")
+  labelTagMap: document.getElementById("labelTagMap"),
+  quickStartEnabled: document.getElementById("quickStartEnabled")
 };
 
 function loadSettings() {
@@ -20,11 +21,16 @@ function loadSettings() {
       defaultTaskId: "",
       defaultTagIds: "[]",
       repoMappings: "[]",
-      labelTagMap: "{}"
+      labelTagMap: "{}",
+      quickStartEnabled: false
     },
     (settings) => {
       Object.keys(fields).forEach((key) => {
-        fields[key].value = settings[key];
+        if (key === "quickStartEnabled") {
+          fields[key].checked = Boolean(settings[key]);
+        } else {
+          fields[key].value = settings[key];
+        }
       });
     }
   );
@@ -57,7 +63,8 @@ form.addEventListener("submit", (event) => {
     defaultTaskId: fields.defaultTaskId.value.trim(),
     defaultTagIds: fields.defaultTagIds.value.trim() || "[]",
     repoMappings: fields.repoMappings.value.trim() || "[]",
-    labelTagMap: fields.labelTagMap.value.trim() || "{}"
+    labelTagMap: fields.labelTagMap.value.trim() || "{}",
+    quickStartEnabled: fields.quickStartEnabled.checked
   };
 
   chrome.storage.sync.set(data, () => {

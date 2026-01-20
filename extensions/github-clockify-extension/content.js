@@ -1,4 +1,4 @@
-function getIssueContext() {
+﻿function getIssueContext() {
   const pathParts = location.pathname.split("/").filter(Boolean);
   const owner = pathParts[0] || "";
   const repo = pathParts[1] || "";
@@ -11,7 +11,15 @@ function getIssueContext() {
     document.querySelector("h1 .js-issue-title");
   const metaTitle = document.querySelector("meta[property='og:title']");
   const metaText = metaTitle ? metaTitle.content : "";
-  const titleFromMeta = metaText ? metaText.split("·")[0].trim() : "";
+  let titleFromMeta = metaText ? metaText.trim() : "";
+  if (metaText) {
+    const dotIndex = metaText.indexOf("\u00b7");
+    if (dotIndex > 0) {
+      titleFromMeta = metaText.slice(0, dotIndex).trim();
+    } else if (metaText.includes("GitHub")) {
+      titleFromMeta = metaText.split("GitHub")[0].trim();
+    }
+  }
   const title = titleNode
     ? titleNode.textContent.trim()
     : titleFromMeta || document.title;
@@ -188,6 +196,17 @@ function insertButton() {
         color: #cf222e;
         font-size: 12px;
       }
+      .clockify-modal .toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: #57606a;
+      }
+      .clockify-modal .toggle input {
+        width: auto;
+        margin: 0;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -226,8 +245,39 @@ function insertButton() {
   statusBadge.id = "clockify-status";
   statusBadge.textContent = "Idle";
 
-  button.addEventListener("click", () => {
-    openClockifyModal(getIssueContext());
+  button.addEventListener("click", async () => {
+    const context = getIssueContext();
+    const quickStartEnabled = await getStorageValue("quickStartEnabled", false);
+    const selectionsRaw = await getStorageValue("repoSelections", "{}");
+    let repoSelections = {};
+    try {
+      repoSelections = JSON.parse(selectionsRaw || "{}");
+    } catch (error) {
+      repoSelections = {};
+    }
+    const repoKey = context.repoFullName || context.repo;
+    const savedSelection = repoKey && repoSelections[repoKey] ? repoSelections[repoKey] : null;
+
+    if (quickStartEnabled && savedSelection && savedSelection.workspaceId) {
+      const response = await sendMessage({
+        type: "START_TIMER_WITH_SELECTION",
+        selection: {
+          workspaceId: savedSelection.workspaceId,
+          projectId: savedSelection.projectId,
+          taskId: savedSelection.taskId,
+          tagIds: Array.isArray(savedSelection.tagIds) ? savedSelection.tagIds : [],
+          description: `${context.title} (${context.url})`
+        }
+      });
+      if (!response || !response.ok) {
+        alert(response && response.error ? response.error : "Failed to start timer.");
+        return;
+      }
+      updateHeaderStatus();
+      return;
+    }
+
+    openClockifyModal(context);
   });
 
   stopButton.addEventListener("click", async () => {
@@ -269,7 +319,7 @@ function init() {
   observer.observe(document.body, { childList: true, subtree: true });
 
   chrome.storage.onChanged.addListener((changes) => {
-    if (changes.lastTimeEntryId) {
+    if (changes.lastTimeEntryId || changes.lastTimeEntryStart) {
       updateHeaderStatus();
     }
   });
@@ -289,7 +339,12 @@ function sendMessage(message) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(message, (response) => {
       if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
+        const errorMessage = chrome.runtime.lastError.message || "Extension context invalidated.";
+        if (errorMessage.toLowerCase().includes("context invalidated")) {
+          resolve({ ok: false, error: "Extension context invalidated." });
+          return;
+        }
+        reject(new Error(errorMessage));
         return;
       }
       resolve(response);
@@ -304,6 +359,22 @@ function normalizeName(value) {
     .trim();
 }
 
+function formatElapsed(startIso) {
+  const startMs = Date.parse(startIso);
+  if (!startMs) {
+    return "00:00";
+  }
+  const diff = Date.now() - startMs;
+  const totalSeconds = Math.max(0, Math.floor(diff / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
 function buildOption(value, label) {
   const option = document.createElement("option");
   option.value = value || "";
@@ -314,6 +385,10 @@ function buildOption(value, label) {
 function getStorageValue(key, fallback) {
   return new Promise((resolve) => {
     chrome.storage.sync.get({ [key]: fallback }, (result) => {
+      if (chrome.runtime.lastError) {
+        resolve(fallback);
+        return;
+      }
       resolve(result[key]);
     });
   });
@@ -325,8 +400,18 @@ function setStorageValue(key, value) {
   });
 }
 
+async function fetchRunningEntryFromApi() {
+  const response = await sendMessage({ type: "FETCH_RUNNING_ENTRY" });
+  if (!response || !response.ok) {
+    return null;
+  }
+  return response.data || null;
+}
+
 async function updateHeaderStatus() {
   const lastTimeEntryId = await getStorageValue("lastTimeEntryId", "");
+  const lastTimeEntryStart = await getStorageValue("lastTimeEntryStart", "");
+  const lastTimeEntryDescription = await getStorageValue("lastTimeEntryDescription", "");
   const statusBadge = document.getElementById("clockify-status");
   const stopButton = document.getElementById("clockify-stop-btn");
 
@@ -334,11 +419,38 @@ async function updateHeaderStatus() {
     return;
   }
 
+  if (updateHeaderStatus.intervalId) {
+    clearInterval(updateHeaderStatus.intervalId);
+    updateHeaderStatus.intervalId = null;
+  }
+
   if (lastTimeEntryId) {
-    statusBadge.textContent = "Clockify: Running";
+    let startIso = lastTimeEntryStart;
+    let description = lastTimeEntryDescription;
+    if (!updateHeaderStatus.lastApiFetch || Date.now() - updateHeaderStatus.lastApiFetch > 60000) {
+      const apiEntry = await fetchRunningEntryFromApi();
+      if (apiEntry && apiEntry.start) {
+        startIso = apiEntry.start;
+        description = apiEntry.description || description;
+        await setStorageValue("lastTimeEntryStart", startIso);
+        await setStorageValue("lastTimeEntryDescription", description);
+      }
+      updateHeaderStatus.lastApiFetch = Date.now();
+    }
+
+    const updateElapsed = () => {
+      const elapsed = formatElapsed(startIso);
+      statusBadge.textContent = `Clockify: ${elapsed}`;
+      statusBadge.title = description
+        ? `Running ${elapsed} - ${description}`
+        : `Running ${elapsed}`;
+    };
+    updateElapsed();
+    updateHeaderStatus.intervalId = setInterval(updateElapsed, 1000);
     stopButton.style.display = "inline-flex";
   } else {
     statusBadge.textContent = "Clockify: Idle";
+    statusBadge.title = "No timer running";
     stopButton.style.display = "none";
   }
 }
@@ -437,6 +549,10 @@ async function openClockifyModal(context) {
         <label for="clockify-description">Description</label>
         <textarea id="clockify-description"></textarea>
       </div>
+      <div class="toggle">
+        <input type="checkbox" id="clockify-quick-start">
+        <label for="clockify-quick-start">Start with last selection next time</label>
+      </div>
       <div class="error" id="clockify-error"></div>
     </div>
     <div class="actions">
@@ -456,6 +572,7 @@ async function openClockifyModal(context) {
   const taskSearch = modal.querySelector("#clockify-task-search");
   const tagsSearch = modal.querySelector("#clockify-tags-search");
   const descriptionField = modal.querySelector("#clockify-description");
+  const quickStartToggle = modal.querySelector("#clockify-quick-start");
   const errorEl = modal.querySelector("#clockify-error");
   const startButton = modal.querySelector("#clockify-start");
   const cancelButton = modal.querySelector("#clockify-cancel");
@@ -464,6 +581,7 @@ async function openClockifyModal(context) {
 
   const repoKey = context.repoFullName || context.repo;
   const selectionsRaw = await getStorageValue("repoSelections", "{}");
+  const quickStartEnabled = await getStorageValue("quickStartEnabled", false);
   let repoSelections = {};
   try {
     repoSelections = JSON.parse(selectionsRaw || "{}");
@@ -471,8 +589,10 @@ async function openClockifyModal(context) {
     repoSelections = {};
   }
   const savedSelection = repoKey && repoSelections[repoKey] ? repoSelections[repoKey] : null;
+  quickStartToggle.checked = Boolean(quickStartEnabled);
 
   function closeModal() {
+    document.removeEventListener("keydown", handleKeydown);
     backdrop.remove();
   }
 
@@ -482,6 +602,20 @@ async function openClockifyModal(context) {
       closeModal();
     }
   });
+
+  function handleKeydown(event) {
+    if (event.key === "Escape") {
+      closeModal();
+      return;
+    }
+    const isEnter = event.key === "Enter";
+    const isMeta = event.metaKey || event.ctrlKey;
+    if (isEnter && isMeta) {
+      startButton.click();
+    }
+  }
+
+  document.addEventListener("keydown", handleKeydown);
 
   function setError(message) {
     errorEl.textContent = message || "";
@@ -606,6 +740,7 @@ async function openClockifyModal(context) {
     };
 
     try {
+      await setStorageValue("quickStartEnabled", quickStartToggle.checked);
       const response = await sendMessage({
         type: "START_TIMER_WITH_SELECTION",
         selection
@@ -664,3 +799,8 @@ if (document.readyState === "loading") {
 } else {
   init();
 }
+
+
+
+
+

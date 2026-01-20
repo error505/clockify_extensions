@@ -88,8 +88,9 @@ async function startTimer(payload) {
   }
 
   const match = resolveMatch(payload, settings);
+  const description = `${payload.title} (${payload.url})`;
   const body = buildTimeEntryBody({
-    description: `${payload.title} (${payload.url})`,
+    description,
     projectId: match.projectId,
     taskId: match.taskId,
     tagIds: match.tagIds
@@ -112,7 +113,9 @@ async function startTimer(payload) {
   const data = JSON.parse(text);
   await chrome.storage.sync.set({
     lastTimeEntryId: data.id,
-    lastTimeEntryWorkspaceId: settings.workspaceId
+    lastTimeEntryWorkspaceId: settings.workspaceId,
+    lastTimeEntryStart: body.start,
+    lastTimeEntryDescription: description
   });
   return data;
 }
@@ -121,7 +124,8 @@ async function stopTimer() {
   const settings = await getSettings();
   const storage = await chrome.storage.sync.get({
     lastTimeEntryId: "",
-    lastTimeEntryWorkspaceId: ""
+    lastTimeEntryWorkspaceId: "",
+    lastTimeEntryStart: ""
   });
   if (!settings.apiKey || !settings.workspaceId) {
     throw new Error("Missing API key or workspace id. Open settings.");
@@ -133,22 +137,58 @@ async function stopTimer() {
     throw new Error("No running timer recorded.");
   }
 
-  const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/time-entries/${timeEntryId}`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Api-Key": settings.apiKey
-    },
-    body: JSON.stringify({ end: new Date().toISOString() })
-  });
+  const endIso = new Date().toISOString();
+  let startIso = storage.lastTimeEntryStart;
+  try {
+    const runningEntry = await fetchRunningEntry(settings.apiKey, workspaceId);
+    if (runningEntry && runningEntry.start) {
+      startIso = runningEntry.start;
+    }
+  } catch (error) {
+    // Fallback to stored start if API lookup fails.
+  }
+  const patchResponse = await fetch(
+    `${API_BASE}/workspaces/${workspaceId}/time-entries/${timeEntryId}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Api-Key": settings.apiKey
+      },
+      body: JSON.stringify({ end: endIso })
+    }
+  );
 
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`Clockify error ${response.status}: ${text}`);
+  let text = await patchResponse.text();
+  if (!patchResponse.ok && patchResponse.status === 405) {
+    if (!startIso) {
+      throw new Error("Missing start time for running entry.");
+    }
+    const putResponse = await fetch(
+      `${API_BASE}/workspaces/${workspaceId}/time-entries/${timeEntryId}`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Api-Key": settings.apiKey
+        },
+        body: JSON.stringify({ start: startIso, end: endIso })
+      }
+    );
+    text = await putResponse.text();
+    if (!putResponse.ok) {
+      throw new Error(`Clockify error ${putResponse.status}: ${text}`);
+    }
+  } else if (!patchResponse.ok) {
+    throw new Error(`Clockify error ${patchResponse.status}: ${text}`);
   }
 
-  await chrome.storage.sync.set({ lastTimeEntryId: "" });
-  return JSON.parse(text);
+  await chrome.storage.sync.set({
+    lastTimeEntryId: "",
+    lastTimeEntryStart: "",
+    lastTimeEntryDescription: ""
+  });
+  return text ? JSON.parse(text) : {};
 }
 
 function buildTimeEntryBody({ description, projectId, taskId, tagIds }) {
@@ -200,6 +240,10 @@ async function fetchTasks(apiKey, workspaceId, projectId) {
   return clockifyGet(`/workspaces/${workspaceId}/projects/${projectId}/tasks`, apiKey);
 }
 
+async function fetchRunningEntry(apiKey, workspaceId) {
+  return clockifyGet(`/workspaces/${workspaceId}/time-entries/in-progress`, apiKey);
+}
+
 async function startTimerWithSelection(selection) {
   const settings = await getSettings();
   if (!settings.apiKey) {
@@ -209,8 +253,9 @@ async function startTimerWithSelection(selection) {
     throw new Error("Workspace is required.");
   }
 
+  const description = selection.description || "";
   const body = buildTimeEntryBody({
-    description: selection.description,
+    description,
     projectId: selection.projectId,
     taskId: selection.taskId,
     tagIds: selection.tagIds
@@ -236,7 +281,9 @@ async function startTimerWithSelection(selection) {
   const data = JSON.parse(text);
   await chrome.storage.sync.set({
     lastTimeEntryId: data.id,
-    lastTimeEntryWorkspaceId: selection.workspaceId
+    lastTimeEntryWorkspaceId: selection.workspaceId,
+    lastTimeEntryStart: body.start,
+    lastTimeEntryDescription: description
   });
   return data;
 }
@@ -306,6 +353,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           throw new Error("Missing API key. Open settings.");
         }
         return fetchTasks(settings.apiKey, message.workspaceId, message.projectId);
+      })
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "FETCH_RUNNING_ENTRY") {
+    getSettings()
+      .then(async (settings) => {
+        if (!settings.apiKey) {
+          throw new Error("Missing API key. Open settings.");
+        }
+        const storage = await chrome.storage.sync.get({
+          lastTimeEntryWorkspaceId: "",
+          workspaceId: settings.workspaceId || ""
+        });
+        const workspaceId =
+          storage.lastTimeEntryWorkspaceId || storage.workspaceId || settings.workspaceId;
+        if (!workspaceId) {
+          throw new Error("Workspace is required.");
+        }
+        return fetchRunningEntry(settings.apiKey, workspaceId);
       })
       .then((data) => sendResponse({ ok: true, data }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));

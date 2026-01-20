@@ -11,7 +11,8 @@
   "activationEvents": [
     "onCommand:clockify.startTimer",
     "onCommand:clockify.stopTimer",
-    "onCommand:clockify.setApiKey"
+    "onCommand:clockify.setApiKey",
+    "onCommand:clockify.openSettings"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -27,15 +28,61 @@
       {
         "command": "clockify.setApiKey",
         "title": "Clockify: Set API Key"
+      },
+      {
+        "command": "clockify.openSettings",
+        "title": "Clockify: Open Settings"
       }
     ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "clockify.startTimer",
+          "group": "clockify@1"
+        },
+        {
+          "command": "clockify.stopTimer",
+          "group": "clockify@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "clockify.startTimer",
+          "group": "navigation@9"
+        },
+        {
+          "command": "clockify.stopTimer",
+          "group": "navigation@10"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "clockify.startTimer",
+          "group": "navigation@9"
+        },
+        {
+          "command": "clockify.stopTimer",
+          "group": "navigation@10"
+        }
+      ]
+    },
     "configuration": {
       "title": "Clockify",
       "properties": {
-        "clockify.workspaceId": {
+        "clockify.quickStartWithLastSelection": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start immediately with the last selection for the current repo."
+        },
+        "clockify.skipPickIfSingle": {
+          "type": "boolean",
+          "default": true,
+          "description": "Skip the workspace picker when there is only one workspace."
+        },
+        "clockify.defaultWorkspaceId": {
           "type": "string",
           "default": "",
-          "description": "Clockify workspace id."
+          "description": "Default Clockify workspace id."
         },
         "clockify.defaultProjectId": {
           "type": "string",
@@ -52,6 +99,11 @@
           "items": { "type": "string" },
           "default": [],
           "description": "Default Clockify tag ids."
+        },
+        "clockify.workspaceId": {
+          "type": "string",
+          "default": "",
+          "description": "Legacy: Clockify workspace id (prefer clockify.defaultWorkspaceId)."
         },
         "clockify.repoMappings": {
           "type": "array",

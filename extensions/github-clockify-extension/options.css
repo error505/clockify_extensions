@@ -13,6 +13,18 @@ label {
   margin-bottom: 12px;
 }
 
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #57606a;
+}
+
+.toggle input {
+  width: auto;
+}
+
 input,
 textarea {
   width: 100%;
