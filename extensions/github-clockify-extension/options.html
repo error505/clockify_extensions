@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Clockify Settings</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <h1>Clockify Settings</h1>
+    <form id="settings-form">
+      <label>
+        API Key
+        <input id="apiKey" type="password" placeholder="Clockify API Key">
+      </label>
+      <label>
+        Workspace ID
+        <input id="workspaceId" type="text" placeholder="Workspace ID">
+      </label>
+      <label>
+        Default Project ID
+        <input id="defaultProjectId" type="text" placeholder="Project ID">
+      </label>
+      <label>
+        Default Task ID
+        <input id="defaultTaskId" type="text" placeholder="Task ID">
+      </label>
+      <label>
+        Default Tag IDs (JSON array)
+        <textarea id="defaultTagIds" rows="3" placeholder='["tag-id"]'></textarea>
+      </label>
+      <label>
+        Repo Mappings (JSON array)
+        <textarea id="repoMappings" rows="6" placeholder='[{"repo":"owner/name","projectId":"...","taskId":"...","tagIds":["..."]}]'></textarea>
+      </label>
+      <label>
+        Label to Tag Map (JSON object)
+        <textarea id="labelTagMap" rows="6" placeholder='{"bug":"tag-id"}'></textarea>
+      </label>
+      <div class="actions">
+        <button type="submit">Save</button>
+        <span id="status"></span>
+      </div>
+    </form>
+    <script src="options.js"></script>
+  </body>
+</html>

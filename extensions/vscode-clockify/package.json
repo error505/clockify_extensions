@@ -1,0 +1,64 @@
+{
+  "name": "vscode-clockify",
+  "displayName": "Clockify for GitHub Issues",
+  "description": "Start Clockify timers based on GitHub issue context.",
+  "version": "0.1.0",
+  "publisher": "your-name",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onCommand:clockify.startTimer",
+    "onCommand:clockify.stopTimer",
+    "onCommand:clockify.setApiKey"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "clockify.startTimer",
+        "title": "Clockify: Start Timer for Issue"
+      },
+      {
+        "command": "clockify.stopTimer",
+        "title": "Clockify: Stop Timer"
+      },
+      {
+        "command": "clockify.setApiKey",
+        "title": "Clockify: Set API Key"
+      }
+    ],
+    "configuration": {
+      "title": "Clockify",
+      "properties": {
+        "clockify.workspaceId": {
+          "type": "string",
+          "default": "",
+          "description": "Clockify workspace id."
+        },
+        "clockify.defaultProjectId": {
+          "type": "string",
+          "default": "",
+          "description": "Default Clockify project id."
+        },
+        "clockify.defaultTaskId": {
+          "type": "string",
+          "default": "",
+          "description": "Default Clockify task id."
+        },
+        "clockify.defaultTagIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Default Clockify tag ids."
+        },
+        "clockify.repoMappings": {
+          "type": "array",
+          "default": [],
+          "description": "Repo to project/task mapping objects like { \"repo\": \"owner/name\", \"projectId\": \"...\", \"taskId\": \"...\", \"tagIds\": [\"...\"] }."
+        }
+      }
+    }
+  }
+}
