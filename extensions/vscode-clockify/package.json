@@ -16,6 +16,23 @@
   ],
   "main": "./extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "clockify",
+          "title": "Clockify",
+          "icon": "resources/clockify.svg"
+        }
+      ]
+    },
+    "views": {
+      "clockify": [
+        {
+          "id": "clockifyView",
+          "name": "Clockify"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "clockify.startTimer",
@@ -63,6 +80,23 @@
         {
           "command": "clockify.stopTimer",
           "group": "navigation@10"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "clockify.startTimer",
+          "group": "inline@1",
+          "when": "view == clockifyView && viewItem == clockifyStart"
+        },
+        {
+          "command": "clockify.stopTimer",
+          "group": "inline@2",
+          "when": "view == clockifyView && viewItem == clockifyStop"
+        },
+        {
+          "command": "clockify.openSettings",
+          "group": "inline@3",
+          "when": "view == clockifyView && viewItem == clockifySettings"
         }
       ]
     },

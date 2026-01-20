@@ -393,6 +393,42 @@ function activate(context) {
   context.subscriptions.push(statusBar);
   let statusInterval = null;
 
+  class ClockifyViewProvider {
+    getTreeItem(element) {
+      const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
+      item.contextValue = element.contextValue;
+      item.command = element.command;
+      return item;
+    }
+
+    getChildren() {
+      return [
+        {
+          label: "Start Timer",
+          contextValue: "clockifyStart",
+          command: { command: "clockify.startTimer", title: "Start Timer" }
+        },
+        {
+          label: "Stop Timer",
+          contextValue: "clockifyStop",
+          command: { command: "clockify.stopTimer", title: "Stop Timer" }
+        },
+        {
+          label: "Open Settings",
+          contextValue: "clockifySettings",
+          command: { command: "clockify.openSettings", title: "Open Settings" }
+        },
+        {
+          label: "Set API Key",
+          contextValue: "clockifyApiKey",
+          command: { command: "clockify.setApiKey", title: "Set API Key" }
+        }
+      ];
+    }
+  }
+
+  vscode.window.registerTreeDataProvider("clockifyView", new ClockifyViewProvider());
+
   function updateStatusBar() {
     const entryId = context.globalState.get("clockify.lastTimeEntryId");
     const entryStart = context.globalState.get("clockify.lastTimeEntryStart");

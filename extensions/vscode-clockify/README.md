@@ -8,6 +8,7 @@ Start and stop Clockify timers based on GitHub repo context with interactive sel
 3) Select:
    `C:\Users\iric_\OneDrive\Dokument\clockify_extensions\extensions\vscode-clockify`
 4) Run "Clockify: Set API Key"
+5) Open the Clockify icon in the Activity Bar for quick actions
 
 ## Features
 - Workspace/project/task/tag selection via Quick Pick
@@ -16,6 +17,7 @@ Start and stop Clockify timers based on GitHub repo context with interactive sel
 - Quick-start with saved selection (optional)
 - Defaults via settings
 - Explorer context menu and editor title actions for Start/Stop
+- Activity Bar view with Start/Stop/Settings shortcuts
 
 ## Usage
 - Run "Clockify: Start Timer for Issue"
