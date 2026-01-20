@@ -115,7 +115,10 @@ async function startTimer(payload) {
     lastTimeEntryId: data.id,
     lastTimeEntryWorkspaceId: settings.workspaceId,
     lastTimeEntryStart: body.start,
-    lastTimeEntryDescription: description
+    lastTimeEntryDescription: description,
+    lastTimeEntryProjectId: body.projectId || "",
+    lastTimeEntryTaskId: body.taskId || "",
+    lastTimeEntryTagIds: Array.isArray(body.tagIds) ? body.tagIds : []
   });
   return data;
 }
@@ -126,7 +129,10 @@ async function stopTimer() {
     lastTimeEntryId: "",
     lastTimeEntryWorkspaceId: "",
     lastTimeEntryStart: "",
-    lastTimeEntryDescription: ""
+    lastTimeEntryDescription: "",
+    lastTimeEntryProjectId: "",
+    lastTimeEntryTaskId: "",
+    lastTimeEntryTagIds: []
   });
   if (!settings.apiKey || !settings.workspaceId) {
     throw new Error("Missing API key or workspace id. Open settings.");
@@ -170,7 +176,10 @@ async function stopTimer() {
       start: startIso,
       end: endIso,
       runningEntry,
-      fallbackDescription: storage.lastTimeEntryDescription
+      fallbackDescription: storage.lastTimeEntryDescription,
+      fallbackProjectId: storage.lastTimeEntryProjectId,
+      fallbackTaskId: storage.lastTimeEntryTaskId,
+      fallbackTagIds: storage.lastTimeEntryTagIds
     });
     const putResponse = await fetch(
       `${API_BASE}/workspaces/${workspaceId}/time-entries/${timeEntryId}`,
@@ -194,12 +203,23 @@ async function stopTimer() {
   await chrome.storage.sync.set({
     lastTimeEntryId: "",
     lastTimeEntryStart: "",
-    lastTimeEntryDescription: ""
+    lastTimeEntryDescription: "",
+    lastTimeEntryProjectId: "",
+    lastTimeEntryTaskId: "",
+    lastTimeEntryTagIds: []
   });
   return text ? JSON.parse(text) : {};
 }
 
-function buildStopPutBody({ start, end, runningEntry, fallbackDescription }) {
+function buildStopPutBody({
+  start,
+  end,
+  runningEntry,
+  fallbackDescription,
+  fallbackProjectId,
+  fallbackTaskId,
+  fallbackTagIds
+}) {
   const body = {
     start,
     end,
@@ -207,14 +227,21 @@ function buildStopPutBody({ start, end, runningEntry, fallbackDescription }) {
       (runningEntry && runningEntry.description) || fallbackDescription || ""
   };
 
-  if (runningEntry && runningEntry.projectId) {
-    body.projectId = runningEntry.projectId;
+  const projectId =
+    (runningEntry && runningEntry.projectId) || fallbackProjectId || "";
+  const taskId = (runningEntry && runningEntry.taskId) || fallbackTaskId || "";
+  const tagIds =
+    (runningEntry && Array.isArray(runningEntry.tagIds) && runningEntry.tagIds) ||
+    (Array.isArray(fallbackTagIds) ? fallbackTagIds : []);
+
+  if (projectId) {
+    body.projectId = projectId;
   }
-  if (runningEntry && runningEntry.taskId) {
-    body.taskId = runningEntry.taskId;
+  if (taskId) {
+    body.taskId = taskId;
   }
-  if (runningEntry && Array.isArray(runningEntry.tagIds) && runningEntry.tagIds.length) {
-    body.tagIds = runningEntry.tagIds;
+  if (Array.isArray(tagIds) && tagIds.length) {
+    body.tagIds = tagIds;
   }
   if (runningEntry && typeof runningEntry.billable === "boolean") {
     body.billable = runningEntry.billable;
@@ -315,7 +342,10 @@ async function startTimerWithSelection(selection) {
     lastTimeEntryId: data.id,
     lastTimeEntryWorkspaceId: selection.workspaceId,
     lastTimeEntryStart: body.start,
-    lastTimeEntryDescription: description
+    lastTimeEntryDescription: description,
+    lastTimeEntryProjectId: body.projectId || "",
+    lastTimeEntryTaskId: body.taskId || "",
+    lastTimeEntryTagIds: Array.isArray(body.tagIds) ? body.tagIds : []
   });
   return data;
 }

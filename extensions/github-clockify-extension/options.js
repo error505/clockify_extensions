@@ -47,7 +47,12 @@ form.addEventListener("submit", (event) => {
   const data = {
     apiKey: fields.apiKey.value.trim(),
     labelTagMap: fields.labelTagMap.value.trim() || "{}",
-    quickStartEnabled: fields.quickStartEnabled.checked
+    quickStartEnabled: fields.quickStartEnabled.checked,
+    workspaceId: "",
+    defaultProjectId: "",
+    defaultTaskId: "",
+    defaultTagIds: "[]",
+    repoMappings: "[]"
   };
 
   chrome.storage.sync.set(data, () => {

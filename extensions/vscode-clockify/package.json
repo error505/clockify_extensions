@@ -26,7 +26,7 @@
           "icon": "resources/clockify.svg"
         }
       ],
-      "secondarySideBar": [
+      "secondarySidebar": [
         {
           "id": "clockifySecondary",
           "title": "Clockify",
