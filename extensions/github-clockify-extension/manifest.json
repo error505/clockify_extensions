@@ -3,12 +3,15 @@
   "name": "GitHub Clockify Starter",
   "version": "0.1.0",
   "description": "Start Clockify timers from GitHub issues and PRs.",
-  "permissions": ["storage"],
-  "host_permissions": ["https://api.clockify.me/*"],
+  "permissions": ["storage", "scripting"],
+  "host_permissions": [
+    "https://github.com/*",
+    "https://api.clockify.me/*"
+  ],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
     {
-      "matches": ["https://github.com/*/*/issues/*", "https://github.com/*/*/pull/*"],
+      "matches": ["https://github.com/*"],
       "js": ["content.js"]
     }
   ],
