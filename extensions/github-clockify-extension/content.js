@@ -5,10 +5,16 @@ function getIssueContext() {
   const number = pathParts[3] || "";
   const titleNode =
     document.querySelector("[data-testid='issue-title']") ||
+    document.querySelector("[data-testid='issue-title-sticky']") ||
     document.querySelector("h1 span[data-component='issue-title']") ||
     document.querySelector("h1 span.js-issue-title") ||
     document.querySelector("h1 .js-issue-title");
-  const title = titleNode ? titleNode.textContent.trim() : document.title;
+  const metaTitle = document.querySelector("meta[property='og:title']");
+  const metaText = metaTitle ? metaTitle.content : "";
+  const titleFromMeta = metaText ? metaText.split("·")[0].trim() : "";
+  const title = titleNode
+    ? titleNode.textContent.trim()
+    : titleFromMeta || document.title;
   const labelNodes = Array.from(
     document.querySelectorAll(
       "a.IssueLabel, span.IssueLabel, [data-testid='issue-labels'] span"
@@ -54,6 +60,30 @@ function insertButton() {
       }
       #clockify-start-btn:active {
         background: #edeff2;
+      }
+      #clockify-stop-btn {
+        appearance: none;
+        border: 1px solid #cf222e;
+        border-radius: 6px;
+        background: #fff5f5;
+        color: #cf222e;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 20px;
+        padding: 4px 10px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      #clockify-stop-btn:hover {
+        background: #ffe7e9;
+      }
+      #clockify-status {
+        font-size: 12px;
+        color: #57606a;
+        background: #f6f8fa;
+        border: 1px solid #d0d7de;
+        border-radius: 999px;
+        padding: 2px 8px;
       }
       #clockify-action-bar {
         display: inline-flex;
@@ -126,6 +156,13 @@ function insertButton() {
         gap: 12px;
         grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
       }
+      .clockify-modal .search {
+        margin-bottom: 6px;
+      }
+      .clockify-modal select[multiple] {
+        min-height: 96px;
+        background: #ffffff;
+      }
       .clockify-modal .actions {
         display: flex;
         justify-content: flex-end;
@@ -180,11 +217,37 @@ function insertButton() {
   button.id = "clockify-start-btn";
   button.textContent = "Start Clockify";
 
+  const stopButton = document.createElement("button");
+  stopButton.id = "clockify-stop-btn";
+  stopButton.textContent = "Stop";
+  stopButton.style.display = "none";
+
+  const statusBadge = document.createElement("span");
+  statusBadge.id = "clockify-status";
+  statusBadge.textContent = "Idle";
+
   button.addEventListener("click", () => {
     openClockifyModal(getIssueContext());
   });
 
+  stopButton.addEventListener("click", async () => {
+    stopButton.textContent = "Stopping...";
+    try {
+      const response = await sendMessage({ type: "STOP_TIMER" });
+      if (!response || !response.ok) {
+        throw new Error(response && response.error ? response.error : "Stop failed.");
+      }
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      stopButton.textContent = "Stop";
+      await updateHeaderStatus();
+    }
+  });
+
   bar.appendChild(button);
+  bar.appendChild(stopButton);
+  bar.appendChild(statusBadge);
 
   if (headerActions) {
     container.appendChild(bar);
@@ -195,6 +258,8 @@ function insertButton() {
   } else {
     container.appendChild(bar);
   }
+
+  updateHeaderStatus();
 }
 
 function init() {
@@ -202,6 +267,12 @@ function init() {
   insertButton();
   const observer = new MutationObserver(() => insertButton());
   observer.observe(document.body, { childList: true, subtree: true });
+
+  chrome.storage.onChanged.addListener((changes) => {
+    if (changes.lastTimeEntryId) {
+      updateHeaderStatus();
+    }
+  });
 
   let attempts = 0;
   const maxAttempts = 10;
@@ -226,11 +297,98 @@ function sendMessage(message) {
   });
 }
 
+function normalizeName(value) {
+  return (value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
 function buildOption(value, label) {
   const option = document.createElement("option");
   option.value = value || "";
   option.textContent = label || "Unspecified";
   return option;
+}
+
+function getStorageValue(key, fallback) {
+  return new Promise((resolve) => {
+    chrome.storage.sync.get({ [key]: fallback }, (result) => {
+      resolve(result[key]);
+    });
+  });
+}
+
+function setStorageValue(key, value) {
+  return new Promise((resolve) => {
+    chrome.storage.sync.set({ [key]: value }, () => resolve());
+  });
+}
+
+async function updateHeaderStatus() {
+  const lastTimeEntryId = await getStorageValue("lastTimeEntryId", "");
+  const statusBadge = document.getElementById("clockify-status");
+  const stopButton = document.getElementById("clockify-stop-btn");
+
+  if (!statusBadge || !stopButton) {
+    return;
+  }
+
+  if (lastTimeEntryId) {
+    statusBadge.textContent = "Clockify: Running";
+    stopButton.style.display = "inline-flex";
+  } else {
+    statusBadge.textContent = "Clockify: Idle";
+    stopButton.style.display = "none";
+  }
+}
+
+function applySearchFilter(inputEl, selectEl) {
+  const query = normalizeName(inputEl.value);
+  const listType = selectEl.getAttribute("data-list");
+  const listMap = {
+    projects: applySearchFilter.projects || [],
+    tasks: applySearchFilter.tasks || [],
+    tags: applySearchFilter.tags || []
+  };
+  const source = listMap[listType] || [];
+  const filtered = query
+    ? source.filter((item) => normalizeName(item.name).includes(query))
+    : source;
+  renderSelectOptions(selectEl, filtered, listType !== "tags");
+}
+
+function selectTagsByLabels(tagsSelect, labels) {
+  if (!labels.length) {
+    return;
+  }
+  const normalizedLabels = labels.map(normalizeName);
+  Array.from(tagsSelect.options).forEach((option) => {
+    if (!option.value) {
+      return;
+    }
+    const optionName = normalizeName(option.textContent);
+    if (normalizedLabels.includes(optionName)) {
+      option.selected = true;
+    }
+  });
+}
+
+function renderSelectOptions(selectEl, items, includeEmpty) {
+  const currentValue = selectEl.value;
+  selectEl.innerHTML = "";
+  if (includeEmpty) {
+    selectEl.appendChild(buildOption("", selectEl.id === "clockify-task" ? "No task" : "No project"));
+  }
+  items.forEach((item) => {
+    selectEl.appendChild(buildOption(item.id, item.name));
+  });
+  if (currentValue) {
+    const match = Array.from(selectEl.options).find((opt) => opt.value === currentValue);
+    if (match) {
+      selectEl.value = currentValue;
+    }
+  }
 }
 
 async function openClockifyModal(context) {
@@ -257,20 +415,23 @@ async function openClockifyModal(context) {
       <div class="row">
         <div>
           <label for="clockify-project">Project</label>
-          <select id="clockify-project">
+          <input class="search" id="clockify-project-search" type="text" placeholder="Search projects">
+          <select id="clockify-project" data-list="projects">
             <option value="">No project</option>
           </select>
         </div>
         <div>
           <label for="clockify-task">Task</label>
-          <select id="clockify-task">
+          <input class="search" id="clockify-task-search" type="text" placeholder="Search tasks">
+          <select id="clockify-task" data-list="tasks">
             <option value="">No task</option>
           </select>
         </div>
       </div>
       <div>
         <label for="clockify-tags">Tags</label>
-        <select id="clockify-tags" multiple size="4"></select>
+        <input class="search" id="clockify-tags-search" type="text" placeholder="Search tags">
+        <select id="clockify-tags" data-list="tags" multiple size="4"></select>
       </div>
       <div>
         <label for="clockify-description">Description</label>
@@ -291,12 +452,25 @@ async function openClockifyModal(context) {
   const projectSelect = modal.querySelector("#clockify-project");
   const taskSelect = modal.querySelector("#clockify-task");
   const tagsSelect = modal.querySelector("#clockify-tags");
+  const projectSearch = modal.querySelector("#clockify-project-search");
+  const taskSearch = modal.querySelector("#clockify-task-search");
+  const tagsSearch = modal.querySelector("#clockify-tags-search");
   const descriptionField = modal.querySelector("#clockify-description");
   const errorEl = modal.querySelector("#clockify-error");
   const startButton = modal.querySelector("#clockify-start");
   const cancelButton = modal.querySelector("#clockify-cancel");
 
   descriptionField.value = `${context.title} (${context.url})`;
+
+  const repoKey = context.repoFullName || context.repo;
+  const selectionsRaw = await getStorageValue("repoSelections", "{}");
+  let repoSelections = {};
+  try {
+    repoSelections = JSON.parse(selectionsRaw || "{}");
+  } catch (error) {
+    repoSelections = {};
+  }
+  const savedSelection = repoKey && repoSelections[repoKey] ? repoSelections[repoKey] : null;
 
   function closeModal() {
     backdrop.remove();
@@ -313,6 +487,16 @@ async function openClockifyModal(context) {
     errorEl.textContent = message || "";
   }
 
+  function setSelectValue(selectEl, value) {
+    if (!value) {
+      return;
+    }
+    const match = Array.from(selectEl.options).find((opt) => opt.value === value);
+    if (match) {
+      selectEl.value = value;
+    }
+  }
+
   async function loadWorkspaces() {
     const response = await sendMessage({ type: "FETCH_WORKSPACES" });
     if (!response || !response.ok) {
@@ -325,10 +509,10 @@ async function openClockifyModal(context) {
   }
 
   async function loadProjects(workspaceId) {
-    projectSelect.innerHTML = "";
-    projectSelect.appendChild(buildOption("", "No project"));
-    taskSelect.innerHTML = "";
-    taskSelect.appendChild(buildOption("", "No task"));
+    applySearchFilter.projects = [];
+    applySearchFilter.tasks = [];
+    renderSelectOptions(projectSelect, [], true);
+    renderSelectOptions(taskSelect, [], true);
     if (!workspaceId) {
       return;
     }
@@ -336,13 +520,13 @@ async function openClockifyModal(context) {
     if (!response || !response.ok) {
       throw new Error(response && response.error ? response.error : "Failed to load projects.");
     }
-    response.data.forEach((project) => {
-      projectSelect.appendChild(buildOption(project.id, project.name));
-    });
+    applySearchFilter.projects = response.data;
+    renderSelectOptions(projectSelect, response.data, true);
   }
 
   async function loadTags(workspaceId) {
-    tagsSelect.innerHTML = "";
+    applySearchFilter.tags = [];
+    renderSelectOptions(tagsSelect, [], false);
     if (!workspaceId) {
       return;
     }
@@ -350,14 +534,13 @@ async function openClockifyModal(context) {
     if (!response || !response.ok) {
       throw new Error(response && response.error ? response.error : "Failed to load tags.");
     }
-    response.data.forEach((tag) => {
-      tagsSelect.appendChild(buildOption(tag.id, tag.name));
-    });
+    applySearchFilter.tags = response.data;
+    renderSelectOptions(tagsSelect, response.data, false);
   }
 
   async function loadTasks(workspaceId, projectId) {
-    taskSelect.innerHTML = "";
-    taskSelect.appendChild(buildOption("", "No task"));
+    applySearchFilter.tasks = [];
+    renderSelectOptions(taskSelect, [], true);
     if (!workspaceId || !projectId) {
       return;
     }
@@ -369,9 +552,8 @@ async function openClockifyModal(context) {
     if (!response || !response.ok) {
       throw new Error(response && response.error ? response.error : "Failed to load tasks.");
     }
-    response.data.forEach((task) => {
-      taskSelect.appendChild(buildOption(task.id, task.name));
-    });
+    applySearchFilter.tasks = response.data;
+    renderSelectOptions(taskSelect, response.data, true);
   }
 
   workspaceSelect.addEventListener("change", async () => {
@@ -379,6 +561,18 @@ async function openClockifyModal(context) {
     try {
       await loadProjects(workspaceSelect.value);
       await loadTags(workspaceSelect.value);
+      if (savedSelection) {
+        setSelectValue(projectSelect, savedSelection.projectId);
+        await loadTasks(workspaceSelect.value, projectSelect.value);
+        setSelectValue(taskSelect, savedSelection.taskId);
+        if (Array.isArray(savedSelection.tagIds)) {
+          Array.from(tagsSelect.options).forEach((opt) => {
+            opt.selected = savedSelection.tagIds.includes(opt.value);
+          });
+        }
+      } else {
+        selectTagsByLabels(tagsSelect, context.labels);
+      }
     } catch (error) {
       setError(error.message);
     }
@@ -392,6 +586,10 @@ async function openClockifyModal(context) {
       setError(error.message);
     }
   });
+
+  projectSearch.addEventListener("input", () => applySearchFilter(projectSearch, projectSelect));
+  taskSearch.addEventListener("input", () => applySearchFilter(taskSearch, taskSelect));
+  tagsSearch.addEventListener("input", () => applySearchFilter(tagsSearch, tagsSelect));
 
   startButton.addEventListener("click", async () => {
     setError("");
@@ -415,7 +613,12 @@ async function openClockifyModal(context) {
       if (!response || !response.ok) {
         throw new Error(response && response.error ? response.error : "Failed to start timer.");
       }
+      if (repoKey) {
+        repoSelections[repoKey] = selection;
+        await setStorageValue("repoSelections", JSON.stringify(repoSelections));
+      }
       closeModal();
+      updateHeaderStatus();
     } catch (error) {
       setError(error.message);
     } finally {
@@ -426,9 +629,27 @@ async function openClockifyModal(context) {
 
   try {
     await loadWorkspaces();
+    if (savedSelection) {
+      setSelectValue(workspaceSelect, savedSelection.workspaceId);
+    }
+    if (!workspaceSelect.value && workspaceSelect.options.length === 1) {
+      workspaceSelect.selectedIndex = 0;
+    }
     if (workspaceSelect.value) {
       await loadProjects(workspaceSelect.value);
       await loadTags(workspaceSelect.value);
+      if (savedSelection) {
+        setSelectValue(projectSelect, savedSelection.projectId);
+        await loadTasks(workspaceSelect.value, projectSelect.value);
+        setSelectValue(taskSelect, savedSelection.taskId);
+        if (Array.isArray(savedSelection.tagIds)) {
+          Array.from(tagsSelect.options).forEach((opt) => {
+            opt.selected = savedSelection.tagIds.includes(opt.value);
+          });
+        }
+      } else {
+        selectTagsByLabels(tagsSelect, context.labels);
+      }
     }
   } catch (error) {
     setError(error.message);
