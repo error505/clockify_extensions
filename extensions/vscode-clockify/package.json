@@ -12,7 +12,8 @@
     "onCommand:clockify.startTimer",
     "onCommand:clockify.stopTimer",
     "onCommand:clockify.setApiKey",
-    "onCommand:clockify.openSettings"
+    "onCommand:clockify.openSettings",
+    "onView:clockifyView"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -82,23 +83,7 @@
           "group": "navigation@10"
         }
       ],
-      "view/item/context": [
-        {
-          "command": "clockify.startTimer",
-          "group": "inline@1",
-          "when": "view == clockifyView && viewItem == clockifyStart"
-        },
-        {
-          "command": "clockify.stopTimer",
-          "group": "inline@2",
-          "when": "view == clockifyView && viewItem == clockifyStop"
-        },
-        {
-          "command": "clockify.openSettings",
-          "group": "inline@3",
-          "when": "view == clockifyView && viewItem == clockifySettings"
-        }
-      ]
+      "view/item/context": []
     },
     "configuration": {
       "title": "Clockify",

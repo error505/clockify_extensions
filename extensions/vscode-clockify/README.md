@@ -17,7 +17,7 @@ Start and stop Clockify timers based on GitHub repo context with interactive sel
 - Quick-start with saved selection (optional)
 - Defaults via settings
 - Explorer context menu and editor title actions for Start/Stop
-- Activity Bar view with Start/Stop/Settings shortcuts
+- Activity Bar view with timer details and quick actions
 
 ## Usage
 - Run "Clockify: Start Timer for Issue"
@@ -26,6 +26,7 @@ Start and stop Clockify timers based on GitHub repo context with interactive sel
 - Run "Clockify: Open Settings" to adjust defaults
 - Right-click in the Explorer for Start/Stop
 - Use the editor title buttons for Start/Stop
+- Open the Clockify Activity Bar view for timer details
 
 ## Settings
 - `clockify.quickStartWithLastSelection`: start immediately with saved selection
