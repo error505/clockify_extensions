@@ -1,13 +1,15 @@
 {
   "name": "vscode-clockify",
-  "displayName": "Clockify for GitHub Issues",
-  "description": "Start Clockify timers based on GitHub issue context.",
+  "displayName": "Clockify",
+  "description": "Start Clockify timers in VS Code.",
   "version": "0.1.0",
   "publisher": "your-name",
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "activationEvents": [
     "onCommand:clockify.startTimer",
     "onCommand:clockify.stopTimer",
@@ -129,7 +131,9 @@
         },
         "clockify.defaultTagIds": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Default Clockify tag ids."
         },

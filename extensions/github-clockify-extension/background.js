@@ -114,6 +114,7 @@ async function startTimer(payload) {
   await chrome.storage.sync.set({
     lastTimeEntryId: data.id,
     lastTimeEntryWorkspaceId: settings.workspaceId,
+    lastTimeEntryUserId: data.userId || "",
     lastTimeEntryStart: body.start,
     lastTimeEntryDescription: description,
     lastTimeEntryProjectId: body.projectId || "",
@@ -128,6 +129,7 @@ async function stopTimer() {
   const storage = await chrome.storage.sync.get({
     lastTimeEntryId: "",
     lastTimeEntryWorkspaceId: "",
+    lastTimeEntryUserId: "",
     lastTimeEntryStart: "",
     lastTimeEntryDescription: "",
     lastTimeEntryProjectId: "",
@@ -138,25 +140,17 @@ async function stopTimer() {
     throw new Error("Missing API key or workspace id. Open settings.");
   }
 
-  const timeEntryId = storage.lastTimeEntryId;
   const workspaceId = storage.lastTimeEntryWorkspaceId || settings.workspaceId;
-  if (!timeEntryId) {
-    throw new Error("No running timer recorded.");
+  const userId = storage.lastTimeEntryUserId;
+  if (!userId) {
+    throw new Error("Missing user ID. Please start a new timer.");
   }
 
   const endIso = new Date().toISOString();
-  let startIso = storage.lastTimeEntryStart;
-  let runningEntry = null;
-  try {
-    runningEntry = await fetchRunningEntry(settings.apiKey, workspaceId);
-    if (runningEntry && runningEntry.start) {
-      startIso = runningEntry.start;
-    }
-  } catch (error) {
-    // Fallback to stored start if API lookup fails.
-  }
-  const patchResponse = await fetch(
-    `${API_BASE}/workspaces/${workspaceId}/time-entries/${timeEntryId}`,
+
+  // Use the proper endpoint for stopping the timer: PATCH /user/{userId}/time-entries
+  const stopResponse = await fetch(
+    `${API_BASE}/workspaces/${workspaceId}/user/${userId}/time-entries`,
     {
       method: "PATCH",
       headers: {
@@ -167,37 +161,9 @@ async function stopTimer() {
     }
   );
 
-  let text = await patchResponse.text();
-  if (!patchResponse.ok && patchResponse.status === 405) {
-    if (!startIso) {
-      throw new Error("Missing start time for running entry.");
-    }
-    const putBody = buildStopPutBody({
-      start: startIso,
-      end: endIso,
-      runningEntry,
-      fallbackDescription: storage.lastTimeEntryDescription,
-      fallbackProjectId: storage.lastTimeEntryProjectId,
-      fallbackTaskId: storage.lastTimeEntryTaskId,
-      fallbackTagIds: storage.lastTimeEntryTagIds
-    });
-    const putResponse = await fetch(
-      `${API_BASE}/workspaces/${workspaceId}/time-entries/${timeEntryId}`,
-      {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Api-Key": settings.apiKey
-        },
-        body: JSON.stringify(putBody)
-      }
-    );
-    text = await putResponse.text();
-    if (!putResponse.ok) {
-      throw new Error(`Clockify error ${putResponse.status}: ${text}`);
-    }
-  } else if (!patchResponse.ok) {
-    throw new Error(`Clockify error ${patchResponse.status}: ${text}`);
+  const text = await stopResponse.text();
+  if (!stopResponse.ok) {
+    throw new Error(`Clockify error ${stopResponse.status}: ${text}`);
   }
 
   await chrome.storage.sync.set({
@@ -220,32 +186,12 @@ function buildStopPutBody({
   fallbackTaskId,
   fallbackTagIds
 }) {
+  // For PUT request, only send start and end times to avoid permission issues
+  // The entry was already created with the correct details, we just need to stop it
   const body = {
     start,
-    end,
-    description:
-      (runningEntry && runningEntry.description) || fallbackDescription || ""
+    end
   };
-
-  const projectId =
-    (runningEntry && runningEntry.projectId) || fallbackProjectId || "";
-  const taskId = (runningEntry && runningEntry.taskId) || fallbackTaskId || "";
-  const tagIds =
-    (runningEntry && Array.isArray(runningEntry.tagIds) && runningEntry.tagIds) ||
-    (Array.isArray(fallbackTagIds) ? fallbackTagIds : []);
-
-  if (projectId) {
-    body.projectId = projectId;
-  }
-  if (taskId) {
-    body.taskId = taskId;
-  }
-  if (Array.isArray(tagIds) && tagIds.length) {
-    body.tagIds = tagIds;
-  }
-  if (runningEntry && typeof runningEntry.billable === "boolean") {
-    body.billable = runningEntry.billable;
-  }
 
   return body;
 }
@@ -300,7 +246,7 @@ async function fetchTasks(apiKey, workspaceId, projectId) {
 }
 
 async function fetchRunningEntry(apiKey, workspaceId) {
-  return clockifyGet(`/workspaces/${workspaceId}/time-entries/in-progress`, apiKey);
+  return clockifyGet(`/workspaces/${workspaceId}/time-entries/status/in-progress`, apiKey);
 }
 
 async function startTimerWithSelection(selection) {
@@ -341,6 +287,7 @@ async function startTimerWithSelection(selection) {
   await chrome.storage.sync.set({
     lastTimeEntryId: data.id,
     lastTimeEntryWorkspaceId: selection.workspaceId,
+    lastTimeEntryUserId: data.userId || "",
     lastTimeEntryStart: body.start,
     lastTimeEntryDescription: description,
     lastTimeEntryProjectId: body.projectId || "",

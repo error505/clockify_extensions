@@ -1,6 +1,6 @@
 # VS Code Clockify Extension
 
-Start and stop Clockify timers based on GitHub repo context with interactive selection.
+Start and stop Clockify timers based on your workspace context with interactive selection.
 
 ## Install
 1) In VS Code, open the Command Palette

@@ -106,6 +106,10 @@ function fetchTags(apiKey, workspaceId) {
   return clockifyRequest(apiKey, "GET", `/workspaces/${workspaceId}/tags`);
 }
 
+function fetchRunningEntry(apiKey, workspaceId) {
+  return clockifyRequest(apiKey, "GET", `/workspaces/${workspaceId}/time-entries/status/in-progress`);
+}
+
 async function getApiKey(context) {
   let apiKey = await context.secrets.get("clockify.apiKey");
   if (!apiKey) {
@@ -162,7 +166,7 @@ function findNameById(items, id) {
   return match ? match.name : "";
 }
 
-async function startTimer(context) {
+async function startTimer(context, overrideDescription) {
   const config = vscode.workspace.getConfiguration("clockify");
   const quickStart = config.get("quickStartWithLastSelection", false);
   const skipPickIfSingle = config.get("skipPickIfSingle", true);
@@ -182,7 +186,7 @@ async function startTimer(context) {
   const selections = await getRepoSelections(context);
   const savedSelection = selections[repoContext.repo] || null;
 
-  if (quickStart && savedSelection && savedSelection.workspaceId) {
+  if (quickStart && savedSelection && savedSelection.workspaceId && !overrideDescription) {
     try {
       const startIso = new Date().toISOString();
       const entry = await clockifyRequest(
@@ -199,6 +203,7 @@ async function startTimer(context) {
       );
       await context.globalState.update("clockify.lastTimeEntryId", entry.id || "running");
       await context.globalState.update("clockify.lastWorkspaceId", savedSelection.workspaceId);
+      await context.globalState.update("clockify.lastTimeEntryUserId", entry.userId || "");
       await context.globalState.update("clockify.lastTimeEntryStart", startIso);
       vscode.window.showInformationMessage("Clockify timer started.");
     } catch (error) {
@@ -328,12 +333,13 @@ async function startTimer(context) {
   const defaultDescription = descriptionParts.length
     ? `Working on ${descriptionParts.join(" ")}`
     : "Working in VS Code";
-  const description =
-    (await vscode.window.showInputBox({
-      prompt: "Time entry description",
-      value: defaultDescription,
-      ignoreFocusOut: true
-    })) || defaultDescription;
+  const description = overrideDescription
+    ? overrideDescription
+    : (await vscode.window.showInputBox({
+        prompt: "Time entry description",
+        value: savedSelection && savedSelection.description ? savedSelection.description : defaultDescription,
+        ignoreFocusOut: true
+      })) || defaultDescription;
 
   const startIso = new Date().toISOString();
   const body = {
@@ -359,6 +365,7 @@ async function startTimer(context) {
     );
     await context.globalState.update("clockify.lastTimeEntryId", entry.id);
     await context.globalState.update("clockify.lastWorkspaceId", workspaceId);
+    await context.globalState.update("clockify.lastTimeEntryUserId", entry.userId || "");
     await context.globalState.update("clockify.lastTimeEntryStart", startIso);
     await saveRepoSelection(context, repoContext.repo, {
       workspaceId,
@@ -388,20 +395,24 @@ async function stopTimer(context) {
   const workspaceId =
     (await context.globalState.get("clockify.lastWorkspaceId")) ||
     config.get("workspaceId", "");
-  const entryId = await context.globalState.get("clockify.lastTimeEntryId");
-  if (!workspaceId || !entryId) {
+  const userId = await context.globalState.get("clockify.lastTimeEntryUserId");
+  if (!workspaceId || !userId) {
     vscode.window.showErrorMessage("No running timer recorded.");
     return;
   }
 
+  const endIso = new Date().toISOString();
+
   try {
+    // Use the proper endpoint for stopping the timer: PATCH /user/{userId}/time-entries
     await clockifyRequest(
       apiKey,
       "PATCH",
-      `/workspaces/${workspaceId}/time-entries/${entryId}`,
-      { end: new Date().toISOString() }
+      `/workspaces/${workspaceId}/user/${userId}/time-entries`,
+      { end: endIso }
     );
     await context.globalState.update("clockify.lastTimeEntryId", "");
+    await context.globalState.update("clockify.lastTimeEntryUserId", "");
     await context.globalState.update("clockify.lastTimeEntryStart", "");
     vscode.window.showInformationMessage("Clockify timer stopped.");
   } catch (error) {
@@ -492,6 +503,30 @@ function getWebviewHtml() {
             background: #f6f8fa;
             font-size: 12px;
           }
+          .field {
+            margin-top: 10px;
+          }
+          label {
+            font-size: 12px;
+            font-weight: 600;
+            color: #57606a;
+            display: block;
+            margin-bottom: 6px;
+          }
+          input,
+          textarea {
+            width: 100%;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            padding: 6px 8px;
+            font-size: 12px;
+            font-family: Segoe UI, Arial, sans-serif;
+            background: #f6f8fa;
+          }
+          textarea {
+            min-height: 64px;
+            resize: vertical;
+          }
           .actions {
             display: grid;
             gap: 8px;
@@ -514,6 +549,14 @@ function getWebviewHtml() {
             margin: 6px 0 0;
             padding-left: 16px;
             font-size: 12px;
+          }
+          .inline {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+          }
+          .inline button {
+            white-space: nowrap;
           }
         </style>
       </head>
@@ -545,17 +588,21 @@ function getWebviewHtml() {
               <ul id="tags"></ul>
             </div>
           </div>
-          <div class="row">
-            <div>
-              <div class="muted">Description</div>
-              <div id="description">None</div>
+          <div class="field">
+            <label for="descriptionInput">Description</label>
+            <textarea id="descriptionInput" placeholder="What are you working on?"></textarea>
+          </div>
+          <div class="field">
+            <label for="apiKeyInput">API Key</label>
+            <div class="inline">
+              <input id="apiKeyInput" type="password" placeholder="Clockify API key">
+              <button id="saveApiKey">Save</button>
             </div>
           </div>
           <div class="actions">
             <button class="primary" id="start">Start timer</button>
             <button id="stop">Stop timer</button>
             <button id="settings">Open settings</button>
-            <button id="apiKey">Set API key</button>
           </div>
         </div>
         <script>
@@ -563,7 +610,9 @@ function getWebviewHtml() {
           const startButton = document.getElementById("start");
           const stopButton = document.getElementById("stop");
           const settingsButton = document.getElementById("settings");
-          const apiKeyButton = document.getElementById("apiKey");
+          const apiKeyButton = document.getElementById("saveApiKey");
+          const apiKeyInput = document.getElementById("apiKeyInput");
+          const descriptionInput = document.getElementById("descriptionInput");
 
           function setText(id, value) {
             document.getElementById(id).textContent = value || "None";
@@ -585,10 +634,16 @@ function getWebviewHtml() {
             });
           }
 
-          startButton.addEventListener("click", () => vscode.postMessage({ type: "start" }));
+          startButton.addEventListener("click", () => {
+            const description = descriptionInput.value.trim();
+            vscode.postMessage({ type: "start", description });
+          });
           stopButton.addEventListener("click", () => vscode.postMessage({ type: "stop" }));
           settingsButton.addEventListener("click", () => vscode.postMessage({ type: "settings" }));
-          apiKeyButton.addEventListener("click", () => vscode.postMessage({ type: "apiKey" }));
+          apiKeyButton.addEventListener("click", () => {
+            vscode.postMessage({ type: "saveApiKey", apiKey: apiKeyInput.value.trim() });
+            apiKeyInput.value = "";
+          });
 
           window.addEventListener("message", (event) => {
             const state = event.data;
@@ -601,7 +656,9 @@ function getWebviewHtml() {
             setText("project", state.project);
             setText("task", state.task);
             setTags(state.tags);
-            setText("description", state.description);
+            if (document.activeElement !== descriptionInput) {
+              descriptionInput.value = state.description || "";
+            }
             document.getElementById("status").textContent = state.running ? "Running" : "Idle";
             document.getElementById("elapsed").textContent = state.running ? state.elapsed : "00:00";
             stopButton.disabled = !state.running;
@@ -613,7 +670,6 @@ function getWebviewHtml() {
     </html>
   `;
 }
-
 
 function activate(context) {
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -635,11 +691,16 @@ function activate(context) {
           return;
         }
         if (message.type === "start") {
-          await startTimer(context);
+          await startTimer(context, message.description);
         } else if (message.type === "stop") {
           await stopTimer(context);
         } else if (message.type === "settings") {
           await vscode.commands.executeCommand("workbench.action.openSettings", "clockify");
+        } else if (message.type === "saveApiKey") {
+          if (message.apiKey) {
+            await context.secrets.store("clockify.apiKey", message.apiKey);
+            vscode.window.showInformationMessage("Clockify API key saved.");
+          }
         } else if (message.type === "apiKey") {
           await setApiKey(context);
         }
