@@ -135,10 +135,6 @@ function fetchTags(apiKey, workspaceId) {
   return clockifyRequest(apiKey, "GET", `/workspaces/${workspaceId}/tags`);
 }
 
-function fetchRunningEntry(apiKey, workspaceId) {
-  return clockifyRequest(apiKey, "GET", `/workspaces/${workspaceId}/time-entries/status/in-progress`);
-}
-
 async function fetchCurrentUser(apiKey) {
   return clockifyRequest(apiKey, "GET", "/user");
 }
@@ -160,10 +156,11 @@ async function getWorkspaceId(context, apiKey, user) {
   return null;
 }
 
-function fetchUserTimeEntries(apiKey, workspaceId, userId, startDate, endDate) {
+function fetchUserTimeEntries(apiKey, workspaceId, userId, startDate, endDate, inProgressOnly = false) {
   const params = new URLSearchParams();
   if (startDate) params.append("start", startDate);
   if (endDate) params.append("end", endDate);
+  if (inProgressOnly) params.append("in-progress", "true");
   params.append("page-size", "50");
   const queryString = params.toString();
   const path = `/workspaces/${workspaceId}/user/${userId}/time-entries${queryString ? "?" + queryString : ""}`;
@@ -739,8 +736,33 @@ function exportToCSV(entries, fileName = "timesheet.csv") {
   return csv;
 }
 
-function fetchRunningEntry(apiKey, workspaceId) {
-  return clockifyRequest(apiKey, "GET", `/workspaces/${workspaceId}/time-entries/status/in-progress`);
+async function fetchRunningEntry(apiKey, workspaceId, userId = null) {
+  try {
+    console.log("[FETCH-RUNNING] Fetching running entry");
+    // First try workspace-level endpoint (might fail with 403)
+    try {
+      const result = await clockifyRequest(apiKey, "GET", `/workspaces/${workspaceId}/time-entries/status/in-progress`);
+      console.log("[FETCH-RUNNING] Got entry from workspace endpoint");
+      return result;
+    } catch (workspaceError) {
+      if (workspaceError.message && workspaceError.message.includes("403")) {
+        console.log("[FETCH-RUNNING] Workspace endpoint denied (403), using user endpoint fallback");
+        // Fallback to user endpoint
+        if (!userId) {
+          const user = await fetchCurrentUser(apiKey);
+          userId = user.id;
+        }
+        const entries = await fetchUserTimeEntries(apiKey, workspaceId, userId, null, null, true);
+        const entry = Array.isArray(entries) && entries.length > 0 ? entries[0] : null;
+        console.log("[FETCH-RUNNING] Got entry from user endpoint:", entry?.id || "none");
+        return entry;
+      }
+      throw workspaceError;
+    }
+  } catch (error) {
+    console.warn("[FETCH-RUNNING] Failed to fetch running entry:", error.message);
+    return null;
+  }
 }
 
 function fetchWorkspaceSettings(apiKey, workspaceId) {
@@ -773,35 +795,43 @@ async function syncTimerState(context) {
     const apiKey = await context.secrets.get("clockify.apiKey");
     const workspaceId = await context.globalState.get("clockify.lastWorkspaceId");
     const localEntryId = await context.globalState.get("clockify.lastTimeEntryId");
+    const localStartTime = await context.globalState.get("clockify.lastTimeEntryStart");
     
     if (!apiKey || !workspaceId || !localEntryId) {
-      return; // No active timer locally
+      return false; // No active timer locally
     }
 
+    console.log("[SYNC] Checking timer state - local entry:", localEntryId, "started at:", localStartTime);
+
     // Check what's actually running on Clockify
-    const runningEntry = await fetchRunningEntry(apiKey, workspaceId);
+    const userId = await context.globalState.get("clockify.lastTimeEntryUserId");
+    const runningEntry = await fetchRunningEntry(apiKey, workspaceId, userId);
+    console.log("[SYNC] Clockify running entry:", runningEntry?.id || "none");
     
-    if (!runningEntry || !runningEntry.id) {
+    // Only clear state if we successfully fetched and found NO running entry
+    // Don't clear if fetch failed (API error) - that might be temporary
+    if (runningEntry === null) {
+      // Fetch returned null (successful API call, no running entry)
       // Timer was stopped on Clockify but we think it's running locally
-      console.log("Timer stopped on Clockify, syncing local state");
+      console.log("[SYNC] No timer running on Clockify, clearing local state");
       await context.globalState.update("clockify.lastTimeEntryId", "");
       await context.globalState.update("clockify.lastTimeEntryStart", "");
       await context.globalState.update("clockify.lastTimeEntryUserId", "");
       return true; // State changed, update UI
     }
     
-    if (runningEntry.id !== localEntryId) {
+    if (runningEntry && runningEntry.id && runningEntry.id !== localEntryId) {
       // Different timer is running (shouldn't happen but just in case)
-      console.log("Different timer running on Clockify, updating local state");
+      console.log("[SYNC] Different timer running on Clockify, updating local state");
       await context.globalState.update("clockify.lastTimeEntryId", runningEntry.id);
       await context.globalState.update("clockify.lastTimeEntryStart", runningEntry.timeInterval?.start);
       await context.globalState.update("clockify.lastTimeEntryUserId", runningEntry.userId);
       return true; // State changed, update UI
     }
 
-    return false; // State is in sync
+    return false; // State is in sync or fetch failed (keep local state)
   } catch (error) {
-    console.warn("Error syncing timer state:", error);
+    console.warn("[SYNC] Error syncing timer state:", error);
     return false;
   }
 }
@@ -822,6 +852,7 @@ function setApiKey(context) {
 
 async function buildSidebarState(context) {
   // Sync with Clockify's actual state first
+  console.log("[SIDEBAR] Building sidebar state");
   await syncTimerState(context);
 
   const repoContext = await getRepoContext();
@@ -846,13 +877,16 @@ async function buildSidebarState(context) {
   try {
     const apiKey = await context.secrets.get("clockify.apiKey");
     if (apiKey) {
+      console.log("[SIDEBAR] API key found, fetching data");
       const user = await fetchCurrentUser(apiKey);
       if (user && user.id) {
+        console.log("[SIDEBAR] User found:", user.id);
         // Fetch workspaces and determine selected workspace
         workspaces = Array.isArray(await fetchWorkspaces(apiKey)) ? await fetchWorkspaces(apiKey) : [];
         // Prefer repo selection, then last workspace, then user's active workspace
         const repoSel = selection || null;
         selectedWorkspaceId = (repoSel && repoSel.workspaceId) || context.globalState.get("clockify.lastWorkspaceId") || user.activeWorkspace || (workspaces[0] && workspaces[0].id) || null;
+        console.log("[SIDEBAR] Selected workspace:", selectedWorkspaceId);
         if (selectedWorkspaceId) {
           // Fetch projects and tags for selected workspace
           projects = Array.isArray(await fetchProjects(apiKey, selectedWorkspaceId)) ? await fetchProjects(apiKey, selectedWorkspaceId) : [];
@@ -865,13 +899,15 @@ async function buildSidebarState(context) {
           }
 
           // Recent entries and today's total
+          console.log("[SIDEBAR] Fetching recent entries and today's total for user:", user.id);
           recentEntries = await fetchRecentEntries(apiKey, selectedWorkspaceId, user.id);
           todaysTotal = await calculateTodaysTotal(apiKey, selectedWorkspaceId, user.id);
+          console.log("[SIDEBAR] Today's total:", todaysTotal);
         }
       }
     }
   } catch (error) {
-    console.error("Error fetching sidebar data:", error);
+    console.error("[SIDEBAR] Error fetching sidebar data:", error);
   }
 
   templates = getTemplates(context);
@@ -1157,7 +1193,7 @@ function getWebviewHtml() {
     </div>
     <div class="info-row">
       <div class="info-item"><div class="label">Task</div><div style="display: flex; gap: 4px;"><select id="taskSelect" style="flex: 1;"><option value="">No task</option></select><button id="createTaskBtn" class="secondary" style="padding: 8px 6px;">+</button></div></div>
-      <div class="info-item"><div class="label">Tags</div><div><select id="tagsSelect" multiple><option value="">No tags</option></select></div></div>
+      <div class="info-item"><div class="label">Tags</div><div style="display: flex; gap: 4px;"><select id="tagsSelect" multiple style="flex: 1;"><option value="">No tags</option></select><button id="createTagBtn" class="secondary" style="padding: 8px 6px;">+</button></div></div>
     </div>
     <div class="field">
       <label for="descriptionInput">Description</label>
@@ -1274,6 +1310,12 @@ function getWebviewHtml() {
     if (createProjectBtn) {
       createProjectBtn.onclick = () => {
         vscode.postMessage({ type: 'requestProjectInput' });
+      };
+    }
+    const createTagBtn = document.getElementById("createTagBtn");
+    if (createTagBtn) {
+      createTagBtn.onclick = () => {
+        vscode.postMessage({ type: 'requestTagInput' });
       };
     }
     document.getElementById("loadWeekView").onclick = () => vscode.postMessage({ type: "getWeekView" });
@@ -1634,6 +1676,15 @@ function activate(context) {
           if (projectName) {
             webviewProvider.postMessage({ type: 'createProject', projectName });
           }
+        } else if (message.type === "requestTagInput") {
+          const tagName = await vscode.window.showInputBox({
+            prompt: "Enter new tag name",
+            placeHolder: "Tag name...",
+            ignoreFocusOut: true
+          });
+          if (tagName) {
+            webviewProvider.postMessage({ type: 'createTag', tagName });
+          }
         } else if (message.type === "createTask") {
           if (message.taskName) {
             try {
@@ -1672,6 +1723,24 @@ function activate(context) {
               }
             } catch (error) {
               vscode.window.showErrorMessage(error.message || "Failed to create project.");
+            }
+          }
+        } else if (message.type === "createTag") {
+          if (message.tagName) {
+            try {
+              const apiKey = await getApiKey(context);
+              const workspaceId = context.globalState.get("clockify.lastWorkspaceId");
+              if (!apiKey || !workspaceId) {
+                vscode.window.showErrorMessage("Workspace must be selected to create a tag.");
+              } else {
+                const tag = await clockifyRequest(apiKey, "POST", `/workspaces/${workspaceId}/tags`, {
+                  name: message.tagName
+                });
+                vscode.window.showInformationMessage(`Tag '${tag.name}' created.`);
+                await updateSidebar();
+              }
+            } catch (error) {
+              vscode.window.showErrorMessage(error.message || "Failed to create tag.");
             }
           }
         } else if (message.type === "loadTemplate") {
@@ -1870,19 +1939,26 @@ function activate(context) {
 
   updateStatusBar();
 
-  // Start periodic sync check every 5 seconds to detect external timer changes
+  // Start periodic sync check - only when timer is running, check every 10 seconds
   syncInterval = setInterval(async () => {
     try {
+      const entryId = context.globalState.get("clockify.lastTimeEntryId");
+      if (!entryId) {
+        console.log("[SYNC-INTERVAL] No timer running locally, skipping sync");
+        return; // Only sync if timer is running
+      }
+      
+      console.log("[SYNC-INTERVAL] Running sync check");
       const stateChanged = await syncTimerState(context);
       if (stateChanged) {
-        console.log("Timer state changed externally, updating UI");
+        console.log("[SYNC-INTERVAL] State changed, updating UI");
         updateStatusBar();
         updateSidebar();
       }
     } catch (error) {
-      console.warn("Sync interval error:", error);
+      console.warn("[SYNC-INTERVAL] Error:", error);
     }
-  }, 5000);
+  }, 10000);
 
   // Clean up sync interval on deactivation
   context.subscriptions.push({
