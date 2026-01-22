@@ -73,47 +73,6 @@
         "title": "Clockify: Open Settings"
       }
     ],
-    "menus": {
-      "explorer/context": [
-        {
-          "command": "clockify.startTimer",
-          "group": "clockify@1"
-        },
-        {
-          "command": "clockify.stopTimer",
-          "group": "clockify@2"
-        }
-      ],
-      "editor/title": [
-        {
-          "command": "clockify.startTimer",
-          "group": "navigation@9"
-        },
-        {
-          "command": "clockify.stopTimer",
-          "group": "navigation@10"
-        }
-      ],
-      "view/title": [
-        {
-          "command": "clockify.startTimer",
-          "group": "navigation@9"
-        },
-        {
-          "command": "clockify.stopTimer",
-          "group": "navigation@10"
-        },
-        {
-          "command": "clockify.dailySummary",
-          "group": "navigation@11"
-        },
-        {
-          "command": "clockify.timeEntryHistory",
-          "group": "navigation@12"
-        }
-      ],
-      "view/item/context": []
-    },
     "configuration": {
       "title": "Clockify",
       "properties": {
