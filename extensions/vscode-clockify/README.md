@@ -1,15 +1,11 @@
 # VS Code Clockify Extension
 
 Start and stop Clockify timers based on your workspace context with interactive selection.
-![alt text](image.png)
-![alt text](image-1.png)
+![alt text](https://github.com/error505/clockify_extensions/blob/main/extensions/vscode-clockify/image.png?raw=true)
+![alt text](https://github.com/error505/clockify_extensions/blob/main/extensions/vscode-clockify/image-1.png?raw=true)
 ## Install
-1) In VS Code, open the Command Palette
-2) Run: "Developer: Install Extension from Location..."
-3) Select:
-   `C:\Users\iric_\OneDrive\Dokument\clockify_extensions\extensions\vscode-clockify`
-4) Run "Clockify: Set API Key"
-5) Open the Clockify icon in the Activity Bar for quick actions
+1) Run "Clockify: Set API Key"
+2) Open the Clockify icon in the Activity Bar for quick actions
 
 ## Features
 - Workspace/project/task/tag selection via Quick Pick
