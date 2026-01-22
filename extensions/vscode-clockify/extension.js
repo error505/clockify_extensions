@@ -705,6 +705,45 @@ async function startTimerFromEntry(context, entry) {
   }
 }
 
+function exportToCSV(entries, fileName = "timesheet.csv") {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return "";
+  }
+  const headers = ["Date", "Description", "Project", "Duration (hours)", "Tags"];
+  const rows = entries.map(e => [
+    new Date(e.timeInterval?.start).toLocaleDateString(),
+    e.description || "(no description)",
+    e.projectId || "(no project)",
+    ((e.timeInterval?.duration || 0) / 3600).toFixed(2),
+    (e.tagIds || []).join("; ")
+  ]);
+  const csv = [headers, ...rows]
+    .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+    .join("\n");
+  return csv;
+}
+
+async function getWeekEntries(apiKey, workspaceId, userId, daysBack = 7) {
+  try {
+    // Get current week (Monday to Sunday)
+    const now = new Date();
+    const dayOfWeek = now.getDay();
+    const diffToMonday = now.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1);
+    const mondayOfWeek = new Date(now.getFullYear(), now.getMonth(), diffToMonday);
+    mondayOfWeek.setHours(0, 0, 0, 0);
+    
+    const sundayOfWeek = new Date(mondayOfWeek);
+    sundayOfWeek.setDate(sundayOfWeek.getDate() + 6);
+    sundayOfWeek.setHours(23, 59, 59, 999);
+    
+    const entries = await fetchUserTimeEntries(apiKey, workspaceId, userId, mondayOfWeek.toISOString(), sundayOfWeek.toISOString());
+    return Array.isArray(entries) ? entries : [];
+  } catch (error) {
+    console.error("Error fetching week entries:", error);
+    return [];
+  }
+}
+
 async function setApiKey(context) {
   const apiKey = await vscode.window.showInputBox({
     prompt: "Enter Clockify API key",
@@ -1006,6 +1045,24 @@ function getWebviewHtml() {
       justify-content: space-between;
       align-items: center;
     }
+    .week-day {
+      margin-bottom: 12px;
+      padding: 8px;
+      background: var(--vscode-input-background);
+      border-left: 3px solid var(--vscode-badge-background);
+      border-radius: 2px;
+    }
+    .week-day-title {
+      font-weight: 600;
+      font-size: 12px;
+      margin-bottom: 4px;
+      color: var(--vscode-foreground);
+    }
+    .week-entry {
+      font-size: 11px;
+      padding: 2px 0;
+      color: var(--vscode-descriptionForeground);
+    }
   </style>
 </head>
 <body>
@@ -1076,6 +1133,32 @@ function getWebviewHtml() {
     </div>
   </div>
 
+  <div class="divider"></div>
+
+  <div class="card">
+    <div class="title">📅 This Week</div>
+    <div id="weekView" style="font-size: 12px;"></div>
+    <button id="loadWeekView" class="secondary" style="margin-top: 8px;">Refresh</button>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="card">
+    <div class="title">📊 Export</div>
+    <div class="field">
+      <label>Export Timesheet</label>
+      <div class="inline-group">
+        <select id="exportRange" style="flex: 1;">
+          <option value="7">Last 7 days</option>
+          <option value="30">Last 30 days</option>
+        </select>
+        <button id="exportCsv" class="secondary">CSV</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
   <script>
     const vscode = acquireVsCodeApi();
     
@@ -1099,10 +1182,45 @@ function getWebviewHtml() {
     if (wsSel) wsSel.onchange = () => vscode.postMessage({ type: 'workspaceChanged', workspaceId: wsSel.value });
     const prSel = document.getElementById("projectSelect");
     if (prSel) prSel.onchange = () => vscode.postMessage({ type: 'projectChanged', projectId: prSel.value });
+    document.getElementById("loadWeekView").onclick = () => vscode.postMessage({ type: "getWeekView" });
+    document.getElementById("exportCsv").onclick = () => {
+      const range = parseInt(document.getElementById("exportRange").value) || 7;
+      vscode.postMessage({ type: "exportTimesheet", daysBack: range });
+    };
 
     window.addEventListener("message", event => {
       const state = event.data;
-      if (!state || state.type !== "state") return;
+      if (!state) return;
+
+      // Handle week view separately
+      if (state.type === "weekView" && state.weekData) {
+        const weekView = document.getElementById("weekView");
+        weekView.innerHTML = "";
+        const days = Object.keys(state.weekData).sort();
+        if (days.length === 0) {
+          weekView.innerHTML = "<div style='color: var(--vscode-descriptionForeground);'>No entries this week</div>";
+        } else {
+          days.forEach(day => {
+            const entries = state.weekData[day];
+            const dayDiv = document.createElement("div");
+            dayDiv.className = "week-day";
+            const dayTitle = document.createElement("div");
+            dayTitle.className = "week-day-title";
+            dayTitle.textContent = day;
+            dayDiv.appendChild(dayTitle);
+            entries.forEach(entry => {
+              const entryDiv = document.createElement("div");
+              entryDiv.className = "week-entry";
+              entryDiv.textContent = entry.start + " - " + entry.description + " (" + entry.duration + "h)";
+              dayDiv.appendChild(entryDiv);
+            });
+            weekView.appendChild(dayDiv);
+          });
+        }
+        return; // Don't process other state properties
+      }
+
+      if (state.type !== "state") return;
 
       // Basic stats
       document.getElementById("todayHours").textContent = (state.todaysTotal || 0).toFixed(1);
@@ -1242,6 +1360,7 @@ function activate(context) {
   statusBar.command = "clockify.startTimer";
   context.subscriptions.push(statusBar);
   let statusInterval = null;
+  let idleCheckInterval = null;
   const sidebarViews = new Map();
 
   const viewProvider = {
@@ -1260,6 +1379,7 @@ function activate(context) {
       }
 
       view.webview.onDidReceiveMessage(async (message) => {
+        console.log("Webview message received:", message.type);
         if (!message || !message.type) {
           return;
         }
@@ -1359,6 +1479,58 @@ function activate(context) {
         } else if (message.type === "loadEntry") {
           // TODO: Load previous entry
           vscode.window.showInformationMessage("Loading previous entry...");
+        } else if (message.type === "exportTimesheet") {
+          // Export timesheet to CSV
+          try {
+            const apiKey = await getApiKey(context);
+            if (!apiKey) {
+              vscode.window.showErrorMessage("Clockify API key is required.");
+              return;
+            }
+            const user = await fetchCurrentUser(apiKey);
+            const workspaceId = user.activeWorkspace;
+            const entries = await getWeekEntries(apiKey, workspaceId, user.id, message.daysBack || 7);
+            const csv = exportToCSV(entries, "timesheet.csv");
+            const savePath = await vscode.window.showSaveDialog({
+              defaultUri: vscode.Uri.file(`timesheet_${new Date().toISOString().split('T')[0]}.csv`),
+              filters: { "CSV Files": ["csv"] }
+            });
+            if (savePath) {
+              const fs = require("fs");
+              fs.writeFileSync(savePath.fsPath, csv);
+              vscode.window.showInformationMessage("Timesheet exported successfully.");
+            }
+          } catch (error) {
+            vscode.window.showErrorMessage(error.message || "Failed to export timesheet.");
+          }
+        } else if (message.type === "getWeekView") {
+          // Fetch week entries for calendar view
+          try {
+            const apiKey = await getApiKey(context);
+            if (!apiKey) {
+              vscode.window.showErrorMessage("Clockify API key is required.");
+              return;
+            }
+            const user = await fetchCurrentUser(apiKey);
+            const workspaceId = user.activeWorkspace;
+            const entries = await getWeekEntries(apiKey, workspaceId, user.id, 7);
+            // Group entries by day
+            const byDay = {};
+            entries.forEach(e => {
+              const day = new Date(e.timeInterval?.start).toLocaleDateString();
+              if (!byDay[day]) byDay[day] = [];
+              byDay[day].push({
+                description: e.description || "(no description)",
+                duration: ((e.timeInterval?.duration || 0) / 3600).toFixed(2),
+                start: new Date(e.timeInterval?.start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+              });
+            });
+            sidebarViews.forEach(view => {
+              view.webview.postMessage({ type: "weekView", weekData: byDay });
+            });
+          } catch (error) {
+            console.error("Error fetching week view:", error);
+          }
         }
         updateStatusBar();
         updateSidebar();
@@ -1408,16 +1580,52 @@ function activate(context) {
     updateSidebar();
   }
 
+  function startIdleDetection() {
+    if (idleCheckInterval) clearInterval(idleCheckInterval);
+    idleCheckInterval = setInterval(async () => {
+      const entryId = context.globalState.get("clockify.lastTimeEntryId");
+      const entryStart = context.globalState.get("clockify.lastTimeEntryStart");
+      if (!entryId || !entryStart) return;
+      
+      const startMs = Date.parse(entryStart);
+      const elapsedMs = Date.now() - startMs;
+      const elapsedHours = elapsedMs / (1000 * 60 * 60);
+      
+      // Alert if running for 2+ hours
+      if (elapsedHours >= 2) {
+        const response = await vscode.window.showWarningMessage(
+          "⏱️ Timer running for 2+ hours. Still working on this?",
+          "Yes, continue", "Stop timer"
+        );
+        if (response === "Stop timer") {
+          await stopTimer(context);
+          updateStatusBar();
+        }
+        // Reset check so it doesn't spam
+        await context.globalState.update("clockify.idleCheckTime", Date.now());
+      }
+    }, 60000); // Check every minute
+  }
+
+  function stopIdleDetection() {
+    if (idleCheckInterval) {
+      clearInterval(idleCheckInterval);
+      idleCheckInterval = null;
+    }
+  }
+
   context.subscriptions.push(
     vscode.commands.registerCommand("clockify.startTimer", async () => {
       await startTimer(context);
       updateStatusBar();
+      startIdleDetection();
     })
   );
   context.subscriptions.push(
     vscode.commands.registerCommand("clockify.stopTimer", async () => {
       await stopTimer(context);
       updateStatusBar();
+      stopIdleDetection();
     })
   );
   context.subscriptions.push(

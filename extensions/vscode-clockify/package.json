@@ -1,9 +1,9 @@
 {
   "name": "vscode-clockify",
-  "displayName": "Clockify",
-  "description": "Start Clockify timers in VS Code.",
-  "version": "0.1.0",
-  "publisher": "your-name",
+  "displayName": "Clockify Pro",
+  "description": "Advanced Clockify timer management with idle detection, timesheet export (CSV/PDF), calendar week view, templates, and time entry history.",
+  "version": "0.2.0",
+  "publisher": "igor-iric",
   "engines": {
     "vscode": "^1.85.0"
   },
