@@ -2,8 +2,6 @@
 
 Advanced Clockify timer management directly from VS Code with workspace selection, templates, idle detection, timesheet export, and calendar week view.
 
-![Clockify Pro Icon](https://github.com/error505/clockify_extensions/blob/main/extensions/vscode-clockify/resources/clockify.svg?raw=true)
-
 ## Quick Start
 
 ### Getting Your Clockify API Key
