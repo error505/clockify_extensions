@@ -90,6 +90,35 @@ function formatElapsed(startIso) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function formatDuration(durationMs) {
+  const totalSeconds = Math.floor(durationMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  return `${minutes}m`;
+}
+
+function getDateRangeIso(daysBack = 0) {
+  const now = new Date();
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysBack);
+  const endOfDay = new Date(startOfDay.getFullYear(), startOfDay.getMonth(), startOfDay.getDate() + 1);
+  return {
+    start: startOfDay.toISOString(),
+    end: endOfDay.toISOString()
+  };
+}
+
+function getWeekStart() {
+  const now = new Date();
+  const day = now.getDay();
+  const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+  const weekStart = new Date(now.setDate(diff));
+  weekStart.setHours(0, 0, 0, 0);
+  return weekStart.toISOString();
+}
+
 function fetchWorkspaces(apiKey) {
   return clockifyRequest(apiKey, "GET", "/workspaces");
 }
@@ -108,6 +137,110 @@ function fetchTags(apiKey, workspaceId) {
 
 function fetchRunningEntry(apiKey, workspaceId) {
   return clockifyRequest(apiKey, "GET", `/workspaces/${workspaceId}/time-entries/status/in-progress`);
+}
+
+async function fetchCurrentUser(apiKey) {
+  return clockifyRequest(apiKey, "GET", "/user");
+}
+
+async function getWorkspaceId(context, apiKey, user) {
+  let workspaceId = context.globalState.get("clockify.workspaceId");
+  if (workspaceId) return workspaceId;
+  
+  try {
+    const workspaces = await fetchWorkspaces(apiKey);
+    if (Array.isArray(workspaces) && workspaces.length > 0) {
+      workspaceId = workspaces[0].id;
+      await context.globalState.update("clockify.workspaceId", workspaceId);
+      return workspaceId;
+    }
+  } catch (error) {
+    console.error("Error fetching workspaces:", error);
+  }
+  return null;
+}
+
+function fetchUserTimeEntries(apiKey, workspaceId, userId, startDate, endDate) {
+  const params = new URLSearchParams();
+  if (startDate) params.append("start", startDate);
+  if (endDate) params.append("end", endDate);
+  params.append("page-size", "50");
+  const queryString = params.toString();
+  const path = `/workspaces/${workspaceId}/user/${userId}/time-entries${queryString ? "?" + queryString : ""}`;
+  return clockifyRequest(apiKey, "GET", path);
+}
+
+async function fetchRecentEntries(apiKey, workspaceId, userId) {
+  try {
+    const endDate = new Date();
+    const startDate = new Date(endDate.getTime() - 7 * 24 * 60 * 60 * 1000); // Last 7 days
+    const entries = await fetchUserTimeEntries(apiKey, workspaceId, userId, startDate.toISOString(), endDate.toISOString());
+    if (!Array.isArray(entries)) return [];
+    // Sort by most recent first, limit to 5
+    return entries
+      .sort((a, b) => new Date(b.timeInterval.start) - new Date(a.timeInterval.start))
+      .slice(0, 5)
+      .map(entry => ({
+        id: entry.id,
+        description: entry.description || "No description",
+        projectId: entry.projectId,
+        taskId: entry.taskId,
+        duration: entry.timeInterval.duration || 0,
+        date: new Date(entry.timeInterval.start).toLocaleDateString()
+      }));
+  } catch (error) {
+    console.error("Error fetching recent entries:", error);
+    return [];
+  }
+}
+
+async function calculateTodaysTotal(apiKey, workspaceId, userId) {
+  try {
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
+    const entries = await fetchUserTimeEntries(apiKey, workspaceId, userId, startOfDay.toISOString(), endOfDay.toISOString());
+    if (!Array.isArray(entries)) return 0;
+    const totalSeconds = entries.reduce((sum, entry) => sum + (entry.timeInterval.duration || 0), 0);
+    return Math.round(totalSeconds / 3600 * 100) / 100; // Convert to hours
+  } catch (error) {
+    console.error("Error calculating today's total:", error);
+    return 0;
+  }
+}
+
+function getTemplates(context) {
+  const raw = context.globalState.get("clockify.templates", "[]");
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    return [];
+  }
+}
+
+async function saveTemplate(context, name, template) {
+  const templates = getTemplates(context);
+  const index = templates.findIndex(t => t.name === name);
+  if (index >= 0) {
+    templates[index] = { name, ...template };
+  } else {
+    templates.push({ name, ...template });
+  }
+  await context.globalState.update("clockify.templates", JSON.stringify(templates));
+}
+
+async function deleteTemplate(context, name) {
+  const templates = getTemplates(context);
+  const filtered = templates.filter(t => t.name !== name);
+  await context.globalState.update("clockify.templates", JSON.stringify(filtered));
+}
+
+function getDailyGoal(context) {
+  return context.globalState.get("clockify.dailyGoal", 8); // Default 8 hours
+}
+
+async function setDailyGoal(context, hours) {
+  await context.globalState.update("clockify.dailyGoal", hours);
 }
 
 async function getApiKey(context) {
@@ -416,7 +549,159 @@ async function stopTimer(context) {
     await context.globalState.update("clockify.lastTimeEntryStart", "");
     vscode.window.showInformationMessage("Clockify timer stopped.");
   } catch (error) {
-    vscode.window.showErrorMessage(error.message || "Clockify stop failed.");
+    // Handle 404 - timer already stopped in Clockify
+    if (error.message && error.message.includes("404")) {
+      await context.globalState.update("clockify.lastTimeEntryId", "");
+      await context.globalState.update("clockify.lastTimeEntryUserId", "");
+      await context.globalState.update("clockify.lastTimeEntryStart", "");
+      vscode.window.showInformationMessage("Timer was already stopped in Clockify. Cleared local state.");
+    } else {
+      vscode.window.showErrorMessage(error.message || "Clockify stop failed.");
+    }
+  }
+}
+
+async function showDailySummary(context) {
+  const apiKey = await getApiKey(context);
+  if (!apiKey) {
+    vscode.window.showErrorMessage("Clockify API key is required.");
+    return;
+  }
+
+  try {
+    const user = await fetchCurrentUser(apiKey);
+    const workspaceId = user.activeWorkspace;
+    const userId = user.id;
+
+    // Fetch today's entries
+    const todayRange = getDateRangeIso(0);
+    const todayEntries = await fetchUserTimeEntries(apiKey, workspaceId, userId, todayRange.start, todayRange.end);
+    
+    // Fetch this week's entries
+    const weekStart = getWeekStart();
+    const now = new Date().toISOString();
+    const weekEntries = await fetchUserTimeEntries(apiKey, workspaceId, userId, weekStart, now);
+
+    // Calculate totals
+    const calculateTotal = (entries) => {
+      return entries.reduce((sum, entry) => {
+        if (entry.timeInterval && entry.timeInterval.duration) {
+          return sum + entry.timeInterval.duration;
+        }
+        return sum;
+      }, 0);
+    };
+
+    const todayMs = calculateTotal(todayEntries);
+    const weekMs = calculateTotal(weekEntries);
+
+    // Group by project
+    const byProject = {};
+    todayEntries.forEach((entry) => {
+      const projectName = entry.projectId ? `Project ${entry.projectId.substring(0, 8)}` : "No Project";
+      const duration = entry.timeInterval?.duration || 0;
+      byProject[projectName] = (byProject[projectName] || 0) + duration;
+    });
+
+    let summary = `📊 Today: ${formatDuration(todayMs)} | Week: ${formatDuration(weekMs)}\n\n`;
+    summary += "By Project:\n";
+    Object.entries(byProject)
+      .sort((a, b) => b[1] - a[1])
+      .forEach(([project, duration]) => {
+        summary += `  • ${project}: ${formatDuration(duration)}\n`;
+      });
+
+    vscode.window.showInformationMessage(summary);
+  } catch (error) {
+    vscode.window.showErrorMessage(error.message || "Failed to load summary.");
+  }
+}
+
+async function showTimeEntryHistory(context) {
+  const apiKey = await getApiKey(context);
+  if (!apiKey) {
+    vscode.window.showErrorMessage("Clockify API key is required.");
+    return;
+  }
+
+  try {
+    const user = await fetchCurrentUser(apiKey);
+    const workspaceId = user.activeWorkspace;
+    const userId = user.id;
+
+    // Fetch recent entries (last 7 days)
+    const lastWeekStart = new Date();
+    lastWeekStart.setDate(lastWeekStart.getDate() - 7);
+    const entries = await fetchUserTimeEntries(apiKey, workspaceId, userId, lastWeekStart.toISOString(), new Date().toISOString());
+
+    if (!entries || entries.length === 0) {
+      vscode.window.showInformationMessage("No recent time entries found.");
+      return;
+    }
+
+    const quickPickItems = entries.map((entry) => ({
+      label: entry.description || "(No description)",
+      description: `${formatDuration(entry.timeInterval?.duration || 0)} • ${new Date(entry.timeInterval?.start).toLocaleDateString()}`,
+      entry
+    }));
+
+    const selected = await vscode.window.showQuickPick(quickPickItems, {
+      placeHolder: "Select a time entry to resume",
+      matchOnDescription: true
+    });
+
+    if (!selected) return;
+
+    const resume = await vscode.window.showQuickPick(["Resume", "View Details"], {
+      placeHolder: "What would you like to do?"
+    });
+
+    if (resume === "Resume") {
+      await startTimerFromEntry(context, selected.entry);
+    } else if (resume === "View Details") {
+      const entry = selected.entry;
+      let details = `Description: ${entry.description || "(None)"}\n`;
+      if (entry.projectId) details += `Project: ${entry.projectId}\n`;
+      if (entry.taskId) details += `Task: ${entry.taskId}\n`;
+      if (entry.tagIds?.length) details += `Tags: ${entry.tagIds.join(", ")}\n`;
+      details += `Duration: ${formatDuration(entry.timeInterval?.duration || 0)}\n`;
+      details += `Date: ${new Date(entry.timeInterval?.start).toLocaleString()}`;
+      vscode.window.showInformationMessage(details);
+    }
+  } catch (error) {
+    vscode.window.showErrorMessage(error.message || "Failed to load history.");
+  }
+}
+
+async function startTimerFromEntry(context, entry) {
+  const config = vscode.workspace.getConfiguration("clockify");
+  const apiKey = await getApiKey(context);
+  if (!apiKey) {
+    vscode.window.showErrorMessage("Clockify API key is required.");
+    return;
+  }
+
+  const user = await fetchCurrentUser(apiKey);
+  const workspaceId = user.activeWorkspace;
+
+  const startIso = new Date().toISOString();
+  const body = {
+    start: startIso,
+    description: entry.description || "Resumed from history"
+  };
+  if (entry.projectId) body.projectId = entry.projectId;
+  if (entry.taskId) body.taskId = entry.taskId;
+  if (entry.tagIds?.length) body.tagIds = entry.tagIds;
+
+  try {
+    const newEntry = await clockifyRequest(apiKey, "POST", `/workspaces/${workspaceId}/time-entries`, body);
+    await context.globalState.update("clockify.lastTimeEntryId", newEntry.id);
+    await context.globalState.update("clockify.lastWorkspaceId", workspaceId);
+    await context.globalState.update("clockify.lastTimeEntryUserId", newEntry.userId || "");
+    await context.globalState.update("clockify.lastTimeEntryStart", startIso);
+    vscode.window.showInformationMessage("Timer resumed from history.");
+  } catch (error) {
+    vscode.window.showErrorMessage(error.message || "Failed to resume timer.");
   }
 }
 
@@ -440,238 +725,519 @@ async function buildSidebarState(context) {
   const entryStart = context.globalState.get("clockify.lastTimeEntryStart");
   const elapsed = entryId ? formatElapsed(entryStart) : "";
 
+  // Fetch additional data for sidebar
+  let recentEntries = [];
+  let todaysTotal = 0;
+  let templates = [];
+  let dailyGoal = 8;
+  let workspaces = [];
+  let projects = [];
+  let tags = [];
+  let selectedWorkspaceId = null;
+  let selectedProjectId = null;
+
+  try {
+    const apiKey = await context.secrets.get("clockify.apiKey");
+    if (apiKey) {
+      const user = await fetchCurrentUser(apiKey);
+      if (user && user.id) {
+        // Fetch workspaces and determine selected workspace
+        workspaces = Array.isArray(await fetchWorkspaces(apiKey)) ? await fetchWorkspaces(apiKey) : [];
+        // Prefer repo selection, then last workspace, then user's active workspace
+        const repoSel = selection || null;
+        selectedWorkspaceId = (repoSel && repoSel.workspaceId) || context.globalState.get("clockify.lastWorkspaceId") || user.activeWorkspace || (workspaces[0] && workspaces[0].id) || null;
+        if (selectedWorkspaceId) {
+          // Fetch projects and tags for selected workspace
+          projects = Array.isArray(await fetchProjects(apiKey, selectedWorkspaceId)) ? await fetchProjects(apiKey, selectedWorkspaceId) : [];
+          tags = Array.isArray(await fetchTags(apiKey, selectedWorkspaceId)) ? await fetchTags(apiKey, selectedWorkspaceId) : [];
+          selectedProjectId = (repoSel && repoSel.projectId) || context.globalState.get("clockify.lastProjectId") || null;
+
+          // Recent entries and today's total
+          recentEntries = await fetchRecentEntries(apiKey, selectedWorkspaceId, user.id);
+          todaysTotal = await calculateTodaysTotal(apiKey, selectedWorkspaceId, user.id);
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Error fetching sidebar data:", error);
+  }
+
+  templates = getTemplates(context);
+  dailyGoal = getDailyGoal(context);
+
   return {
     running: Boolean(entryId),
     elapsed,
     repo: repoContext.repo,
     branch: repoContext.branch,
-    workspace: selection ? selection.workspaceName || "" : "",
-    project: selection ? selection.projectName || "" : "",
+    workspaces: workspaces.map(w => ({ id: w.id, name: w.name })),
+    projects: projects.map(p => ({ id: p.id, name: p.name })),
+    tagsList: tags.map(t => ({ id: t.id, name: t.name })),
+    workspace: selection ? selection.workspaceName || (workspaces.find(w => w.id === selectedWorkspaceId) || {}).name || "" : (workspaces.find(w => w.id === selectedWorkspaceId) || {}).name || "",
+    project: selection ? selection.projectName || (projects.find(p => p.id === selectedProjectId) || {}).name || "" : (projects.find(p => p.id === selectedProjectId) || {}).name || "",
     task: selection ? selection.taskName || "" : "",
     tags: selection && Array.isArray(selection.tagNames) ? selection.tagNames : [],
-    description: selection ? selection.description || "" : ""
+    description: selection ? selection.description || "" : "",
+    recentEntries,
+    todaysTotal,
+    templates,
+    dailyGoal
   };
 }
 
 function getWebviewHtml() {
-  return `
-    <!doctype html>
-    <html lang="en">
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Clockify</title>
-        <style>
-          :root {
-            color-scheme: light;
-          }
-          body {
-            font-family: Segoe UI, Arial, sans-serif;
-            margin: 0;
-            padding: 12px;
-            color: #24292f;
-          }
-          .card {
-            border: 1px solid #d0d7de;
-            border-radius: 10px;
-            padding: 12px;
-            background: #ffffff;
-          }
-          .title {
-            font-size: 14px;
-            font-weight: 600;
-            margin-bottom: 6px;
-          }
-          .muted {
-            font-size: 12px;
-            color: #57606a;
-          }
-          .row {
-            display: flex;
-            justify-content: space-between;
-            gap: 8px;
-            margin-top: 8px;
-            font-size: 12px;
-          }
-          .pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 2px 8px;
-            border-radius: 999px;
-            border: 1px solid #d0d7de;
-            background: #f6f8fa;
-            font-size: 12px;
-          }
-          .field {
-            margin-top: 10px;
-          }
-          label {
-            font-size: 12px;
-            font-weight: 600;
-            color: #57606a;
-            display: block;
-            margin-bottom: 6px;
-          }
-          input,
-          textarea {
-            width: 100%;
-            border: 1px solid #d0d7de;
-            border-radius: 6px;
-            padding: 6px 8px;
-            font-size: 12px;
-            font-family: Segoe UI, Arial, sans-serif;
-            background: #f6f8fa;
-          }
-          textarea {
-            min-height: 64px;
-            resize: vertical;
-          }
-          .actions {
-            display: grid;
-            gap: 8px;
-            margin-top: 12px;
-          }
-          button {
-            border: 1px solid #d0d7de;
-            border-radius: 6px;
-            background: #f6f8fa;
-            padding: 6px 10px;
-            font-weight: 600;
-            cursor: pointer;
-          }
-          button.primary {
-            background: #1f6feb;
-            border-color: #1f6feb;
-            color: #ffffff;
-          }
-          ul {
-            margin: 6px 0 0;
-            padding-left: 16px;
-            font-size: 12px;
-          }
-          .inline {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-          }
-          .inline button {
-            white-space: nowrap;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <div class="title">Clockify</div>
-          <div class="muted" id="repo">No repo detected</div>
-          <div class="row">
-            <span class="pill" id="status">Idle</span>
-            <span class="pill" id="elapsed">00:00</span>
-          </div>
-          <div class="row">
-            <div>
-              <div class="muted">Workspace</div>
-              <div id="workspace">None</div>
-            </div>
-            <div>
-              <div class="muted">Project</div>
-              <div id="project">None</div>
-            </div>
-          </div>
-          <div class="row">
-            <div>
-              <div class="muted">Task</div>
-              <div id="task">None</div>
-            </div>
-            <div>
-              <div class="muted">Tags</div>
-              <ul id="tags"></ul>
-            </div>
-          </div>
-          <div class="field">
-            <label for="descriptionInput">Description</label>
-            <textarea id="descriptionInput" placeholder="What are you working on?"></textarea>
-          </div>
-          <div class="field">
-            <label for="apiKeyInput">API Key</label>
-            <div class="inline">
-              <input id="apiKeyInput" type="password" placeholder="Clockify API key">
-              <button id="saveApiKey">Save</button>
-            </div>
-          </div>
-          <div class="actions">
-            <button class="primary" id="start">Start timer</button>
-            <button id="stop">Stop timer</button>
-            <button id="settings">Open settings</button>
-          </div>
-        </div>
-        <script>
-          const vscode = acquireVsCodeApi();
-          const startButton = document.getElementById("start");
-          const stopButton = document.getElementById("stop");
-          const settingsButton = document.getElementById("settings");
-          const apiKeyButton = document.getElementById("saveApiKey");
-          const apiKeyInput = document.getElementById("apiKeyInput");
-          const descriptionInput = document.getElementById("descriptionInput");
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      color: var(--vscode-foreground);
+      padding: 16px;
+      background-color: var(--vscode-editor-background);
+    }
+    .card {
+      background: var(--vscode-editor-background);
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+    .title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: var(--vscode-foreground);
+    }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .info-item {
+      flex: 1;
+    }
+    .label {
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .value {
+      font-size: 13px;
+      color: var(--vscode-foreground);
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 500;
+      background: var(--vscode-badge-background);
+      color: var(--vscode-badge-foreground);
+    }
+    .status-badge.running {
+      background: var(--vscode-terminal-ansiGreen);
+      color: var(--vscode-button-foreground);
+    }
+    .timer {
+      font-size: 24px;
+      font-weight: 600;
+      text-align: center;
+      padding: 16px 0;
+      color: var(--vscode-foreground);
+    }
+    .field {
+      margin-bottom: 12px;
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      margin-bottom: 6px;
+      color: var(--vscode-foreground);
+    }
+    input, textarea {
+      width: 100%;
+      padding: 8px 10px;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border);
+      border-radius: 4px;
+      font-family: var(--vscode-font-family);
+      font-size: 13px;
+    }
+    select {
+      width: 100%;
+      padding: 8px 10px;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border);
+      border-radius: 4px;
+      font-family: var(--vscode-font-family);
+      font-size: 13px;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    .tags-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .tag-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      border-radius: 999px;
+      background: var(--vscode-input-background);
+      color: var(--vscode-foreground);
+      border: 1px solid var(--vscode-input-border);
+      font-size: 12px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .tag-chip.selected {
+      background: var(--vscode-badge-background);
+      color: var(--vscode-badge-foreground);
+      border-color: transparent;
+    }
+    input:focus, textarea:focus {
+      outline: 1px solid var(--vscode-focusBorder);
+      border-color: var(--vscode-focusBorder);
+    }
+    textarea {
+      resize: vertical;
+      min-height: 64px;
+    }
+    .button-group {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    button {
+      padding: 10px 16px;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover {
+      background: var(--vscode-button-hoverBackground);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    button.secondary {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
+    button.secondary:hover {
+      background: var(--vscode-button-secondaryHoverBackground);
+    }
+    .inline-group {
+      display: flex;
+      gap: 8px;
+    }
+    .inline-group input {
+      flex: 1;
+    }
+    ul {
+      list-style: none;
+      padding: 0;
+    }
+    li {
+      font-size: 12px;
+      padding: 2px 0;
+      color: var(--vscode-foreground);
+    }
+    .divider {
+      height: 1px;
+      background: var(--vscode-panel-border);
+      margin: 16px 0;
+    }
+    .progress-bar {
+      width: 100%;
+      height: 6px;
+      background: var(--vscode-progressBar-background);
+      border-radius: 3px;
+      overflow: hidden;
+      margin: 8px 0;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--vscode-terminal-ansiGreen);
+      transition: width 0.3s;
+    }
+    .entry-item {
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-input-border);
+      border-radius: 4px;
+      padding: 8px;
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .template-row {
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-input-border);
+      border-radius: 4px;
+      padding: 8px;
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="title">📊 Today: <span id="todayHours">0.0</span>h / <span id="dailyGoal">8</span>h</div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+  </div>
 
-          function setText(id, value) {
-            document.getElementById(id).textContent = value || "None";
-          }
+  <div class="card">
+    <div class="title">⏱️ Timer</div>
+    <div class="timer" id="elapsed">00:00:00</div>
+    <div style="text-align: center; margin-bottom: 12px;">
+      <span class="status-badge" id="status">Idle</span>
+    </div>
+    <div class="info-row">
+      <div class="info-item"><div class="label">Workspace</div><div><select id="workspaceSelect"><option>Not set</option></select></div></div>
+      <div class="info-item"><div class="label">Project</div><div><select id="projectSelect"><option>None</option></select></div></div>
+      <div class="info-item"><div class="label">Tags</div><div id="tagsContainer">No tags</div></div>
+    </div>
+    <div class="field">
+      <label for="descriptionInput">Description</label>
+      <textarea id="descriptionInput"></textarea>
+    </div>
+    <div class="button-group">
+      <button id="start">▶ Start</button>
+      <button id="stop" disabled>⏹ Stop</button>
+    </div>
+  </div>
 
-          function setTags(tags) {
-            const list = document.getElementById("tags");
-            list.innerHTML = "";
-            if (!tags || !tags.length) {
-              const item = document.createElement("li");
-              item.textContent = "None";
-              list.appendChild(item);
-              return;
+  <div class="divider"></div>
+
+  <div class="card">
+    <div class="title">⚡ Recent</div>
+    <div id="recentList" style="font-size: 12px;"></div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="card">
+    <div class="title">⭐ Templates</div>
+    <div class="field">
+      <label>Save as Template</label>
+      <div class="inline-group">
+        <input id="templateName" type="text" placeholder="Name">
+        <button id="saveTemplate" class="secondary">Save</button>
+      </div>
+    </div>
+    <div id="templateList" style="font-size: 12px;"></div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="card">
+    <div class="title">⚙️ Settings</div>
+    <div class="field">
+      <label>Daily Goal</label>
+      <div class="inline-group">
+        <input id="dailyGoalInput" type="number" min="1" max="24" value="8">
+        <button id="setGoal" class="secondary">Set</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>API Key</label>
+      <div class="inline-group">
+        <input id="apiKeyInput" type="password" placeholder="API key">
+        <button id="saveApiKey" class="secondary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const vscode = acquireVsCodeApi();
+    
+    document.getElementById("start").onclick = () => {
+      const description = document.getElementById("descriptionInput").value;
+      const workspaceId = (document.getElementById("workspaceSelect") || {}).value || null;
+      const projectId = (document.getElementById("projectSelect") || {}).value || null;
+      const selectedChips = Array.from(document.querySelectorAll('#tagsContainer .tag-chip.selected'));
+      const tagIds = selectedChips.map(c => c.dataset.id);
+      vscode.postMessage({ type: "startWithSelection", description, selection: { workspaceId, projectId, tagIds } });
+    };
+    document.getElementById("stop").onclick = () => vscode.postMessage({ type: "stop" });
+    document.getElementById("saveTemplate").onclick = () => {
+      const name = document.getElementById("templateName").value;
+      if (name) vscode.postMessage({ type: "saveTemplate", name, description: document.getElementById("descriptionInput").value });
+    };
+    document.getElementById("setGoal").onclick = () => vscode.postMessage({ type: "setGoal", goal: parseInt(document.getElementById("dailyGoalInput").value) });
+    document.getElementById("saveApiKey").onclick = () => vscode.postMessage({ type: "saveApiKey", apiKey: document.getElementById("apiKeyInput").value });
+    // notify extension when workspace/project changes
+    const wsSel = document.getElementById("workspaceSelect");
+    if (wsSel) wsSel.onchange = () => vscode.postMessage({ type: 'workspaceChanged', workspaceId: wsSel.value });
+    const prSel = document.getElementById("projectSelect");
+    if (prSel) prSel.onchange = () => vscode.postMessage({ type: 'projectChanged', projectId: prSel.value });
+
+    window.addEventListener("message", event => {
+      const state = event.data;
+      if (!state || state.type !== "state") return;
+
+      // Basic stats
+      document.getElementById("todayHours").textContent = (state.todaysTotal || 0).toFixed(1);
+      document.getElementById("dailyGoal").textContent = state.dailyGoal || 8;
+      document.getElementById("progressFill").style.width = Math.min(100, ((state.todaysTotal || 0) / (state.dailyGoal || 8)) * 100) + "%";
+
+      if (document.activeElement && document.activeElement.id !== "descriptionInput") document.getElementById("descriptionInput").value = state.description || "";
+
+      const isRunning = state.running === true;
+      document.getElementById("status").textContent = isRunning ? "Running" : "Idle";
+      document.getElementById("status").className = isRunning ? "status-badge running" : "status-badge";
+      document.getElementById("elapsed").textContent = state.elapsed || "00:00:00";
+      document.getElementById("start").disabled = isRunning;
+      document.getElementById("stop").disabled = !isRunning;
+
+      // Workspaces
+      const workspaceSelect = document.getElementById("workspaceSelect");
+      if (workspaceSelect && Array.isArray(state.workspaces)) {
+        const prev = workspaceSelect.value;
+        workspaceSelect.innerHTML = "";
+        state.workspaces.forEach(w => {
+          const opt = document.createElement("option");
+          opt.value = w.id;
+          opt.textContent = w.name;
+          workspaceSelect.appendChild(opt);
+        });
+        // set selected by id or name
+        if (state.workspace) {
+          let set = false;
+          for (const o of workspaceSelect.options) {
+            if (o.value === state.workspace || o.textContent === state.workspace) {
+              workspaceSelect.value = o.value;
+              set = true;
+              break;
             }
-            tags.forEach((tag) => {
-              const item = document.createElement("li");
-              item.textContent = tag;
-              list.appendChild(item);
-            });
           }
+          if (!set && prev) workspaceSelect.value = prev;
+        }
+      }
 
-          startButton.addEventListener("click", () => {
-            const description = descriptionInput.value.trim();
-            vscode.postMessage({ type: "start", description });
-          });
-          stopButton.addEventListener("click", () => vscode.postMessage({ type: "stop" }));
-          settingsButton.addEventListener("click", () => vscode.postMessage({ type: "settings" }));
-          apiKeyButton.addEventListener("click", () => {
-            vscode.postMessage({ type: "saveApiKey", apiKey: apiKeyInput.value.trim() });
-            apiKeyInput.value = "";
-          });
-
-          window.addEventListener("message", (event) => {
-            const state = event.data;
-            if (!state || state.type !== "state") return;
-            const repoText = state.repo
-              ? state.repo + (state.branch ? " - " + state.branch : "")
-              : "No repo detected";
-            setText("repo", repoText);
-            setText("workspace", state.workspace);
-            setText("project", state.project);
-            setText("task", state.task);
-            setTags(state.tags);
-            if (document.activeElement !== descriptionInput) {
-              descriptionInput.value = state.description || "";
+      // Projects
+      const projectSelect = document.getElementById("projectSelect");
+      if (projectSelect && Array.isArray(state.projects)) {
+        const prevP = projectSelect.value;
+        projectSelect.innerHTML = "";
+        const emptyOpt = document.createElement("option");
+        emptyOpt.value = "";
+        emptyOpt.textContent = "(No project)";
+        projectSelect.appendChild(emptyOpt);
+        state.projects.forEach(p => {
+          const opt = document.createElement("option");
+          opt.value = p.id;
+          opt.textContent = p.name;
+          projectSelect.appendChild(opt);
+        });
+        if (state.project) {
+          let setp = false;
+          for (const o of projectSelect.options) {
+            if (o.value === state.project || o.textContent === state.project) {
+              projectSelect.value = o.value;
+              setp = true;
+              break;
             }
-            document.getElementById("status").textContent = state.running ? "Running" : "Idle";
-            document.getElementById("elapsed").textContent = state.running ? state.elapsed : "00:00";
-            stopButton.disabled = !state.running;
-          });
+          }
+          if (!setp && prevP) projectSelect.value = prevP;
+        }
+      }
 
-          vscode.postMessage({ type: "ready" });
-        </script>
-      </body>
-    </html>
-  `;
+      // Tags
+      const tagsContainer = document.getElementById('tagsContainer');
+      if (tagsContainer && Array.isArray(state.tagsList)) {
+        tagsContainer.innerHTML = '';
+        const row = document.createElement('div');
+        row.className = 'tags-row';
+        state.tagsList.forEach(t => {
+          const chip = document.createElement('span');
+          chip.className = 'tag-chip';
+          chip.textContent = t.name;
+          chip.dataset.id = t.id;
+          chip.title = t.name;
+          chip.onclick = () => {
+            chip.classList.toggle('selected');
+          };
+          row.appendChild(chip);
+        });
+        tagsContainer.appendChild(row);
+      }
+
+      // Recent entries
+      const recentList = document.getElementById("recentList");
+      recentList.innerHTML = "";
+      if (state.recentEntries && state.recentEntries.length > 0) {
+        state.recentEntries.forEach(entry => {
+          const div = document.createElement("div");
+          div.className = "entry-item";
+          div.innerHTML = '<div><strong>' + (entry.description || '(no description)') + '</strong><br><small>' + (entry.date || '') + '</small></div>';
+          const btn = document.createElement('button');
+          btn.className = 'secondary';
+          btn.textContent = 'Restart';
+          btn.onclick = () => vscode.postMessage({ type: 'loadEntry', entry });
+          div.appendChild(btn);
+          recentList.appendChild(div);
+        });
+      } else {
+        recentList.innerHTML = "<div style='color: var(--vscode-descriptionForeground);'>No recent entries</div>";
+      }
+
+      // Templates
+      const templateList = document.getElementById("templateList");
+      templateList.innerHTML = "";
+      if (state.templates && state.templates.length > 0) {
+        state.templates.forEach(template => {
+          const div = document.createElement("div");
+          div.className = "template-row";
+          const name = document.createElement('strong'); name.textContent = template.name;
+          const btns = document.createElement('div');
+          const loadBtn = document.createElement('button'); loadBtn.className = 'secondary'; loadBtn.textContent = 'Load'; loadBtn.onclick = () => vscode.postMessage({ type: 'loadTemplate', name: template.name });
+          const delBtn = document.createElement('button'); delBtn.className = 'secondary'; delBtn.textContent = 'Delete'; delBtn.onclick = () => vscode.postMessage({ type: 'deleteTemplate', name: template.name });
+          btns.appendChild(loadBtn); btns.appendChild(document.createTextNode(' ')); btns.appendChild(delBtn);
+          div.appendChild(name); div.appendChild(btns);
+          templateList.appendChild(div);
+        });
+      } else {
+        templateList.innerHTML = "<div style='color: var(--vscode-descriptionForeground);'>No templates</div>";
+      }
+    });
+    // Request initial state
+    vscode.postMessage({ type: "ready" });
+  </script>
+</body>
+</html>`;
 }
 
 function activate(context) {
+  console.log("Clockify extension activating...");
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBar.command = "clockify.startTimer";
   context.subscriptions.push(statusBar);
@@ -680,11 +1246,18 @@ function activate(context) {
 
   const viewProvider = {
     resolveWebviewView(view) {
+      console.log("Resolving Clockify webview...");
       const viewType = view.viewType || "clockifyView";
       sidebarViews.set(viewType, view);
       view.onDidDispose(() => sidebarViews.delete(viewType));
       view.webview.options = { enableScripts: true };
-      view.webview.html = getWebviewHtml();
+      
+      try {
+        view.webview.html = getWebviewHtml();
+        console.log("Webview HTML set successfully");
+      } catch (error) {
+        console.error("Error setting webview HTML:", error);
+      }
 
       view.webview.onDidReceiveMessage(async (message) => {
         if (!message || !message.type) {
@@ -692,8 +1265,51 @@ function activate(context) {
         }
         if (message.type === "start") {
           await startTimer(context, message.description);
+        } else if (message.type === "startWithSelection") {
+          // Start directly with provided selection from webview
+          try {
+            const apiKey = await getApiKey(context);
+            if (!apiKey) {
+              vscode.window.showErrorMessage("Clockify API key is required.");
+            } else if (!message.selection || !message.selection.workspaceId) {
+              vscode.window.showErrorMessage("Workspace selection is required to start timer.");
+            } else {
+              const repoContext = await getRepoContext();
+              const startIso = new Date().toISOString();
+              const body = {
+                start: startIso,
+                description: message.description || `Working on ${repoContext.repo}`
+              };
+              if (message.selection.projectId) body.projectId = message.selection.projectId;
+              if (Array.isArray(message.selection.tagIds) && message.selection.tagIds.length) body.tagIds = message.selection.tagIds;
+              const entry = await clockifyRequest(apiKey, "POST", `/workspaces/${message.selection.workspaceId}/time-entries`, body);
+              await context.globalState.update("clockify.lastTimeEntryId", entry.id || "running");
+              await context.globalState.update("clockify.lastWorkspaceId", message.selection.workspaceId);
+              await context.globalState.update("clockify.lastTimeEntryUserId", entry.userId || "");
+              await context.globalState.update("clockify.lastTimeEntryStart", startIso);
+              // persist selection for this repo
+              if (repoContext && repoContext.repo) {
+                await saveRepoSelection(context, repoContext.repo, {
+                  workspaceId: message.selection.workspaceId,
+                  workspaceName: "",
+                  projectId: message.selection.projectId || "",
+                  projectName: "",
+                  tagIds: message.selection.tagIds || [],
+                  tagNames: []
+                });
+              }
+              vscode.window.showInformationMessage("Clockify timer started.");
+            }
+          } catch (error) {
+            vscode.window.showErrorMessage(error.message || "Clockify start failed.");
+          }
         } else if (message.type === "stop") {
+        
           await stopTimer(context);
+        } else if (message.type === "dailySummary") {
+          await showDailySummary(context);
+        } else if (message.type === "history") {
+          await showTimeEntryHistory(context);
         } else if (message.type === "settings") {
           await vscode.commands.executeCommand("workbench.action.openSettings", "clockify");
         } else if (message.type === "saveApiKey") {
@@ -703,6 +1319,46 @@ function activate(context) {
           }
         } else if (message.type === "apiKey") {
           await setApiKey(context);
+        } else if (message.type === "saveTemplate") {
+          if (message.name && message.description !== undefined) {
+            await saveTemplate(context, message.name, {
+              description: message.description
+            });
+            vscode.window.showInformationMessage("Template \"" + message.name + "\" saved.");
+          }
+        } else if (message.type === "deleteTemplate") {
+          if (message.name) {
+            await deleteTemplate(context, message.name);
+            vscode.window.showInformationMessage("Template \"" + message.name + "\" deleted.");
+          }
+        } else if (message.type === "workspaceChanged") {
+          if (message.workspaceId) {
+            await context.globalState.update("clockify.lastWorkspaceId", message.workspaceId);
+            // clear project cache for new workspace
+            await context.globalState.update("clockify.lastProjectId", "");
+            vscode.window.showInformationMessage("Workspace changed.");
+          }
+        } else if (message.type === "projectChanged") {
+          if (message.projectId !== undefined) {
+            await context.globalState.update("clockify.lastProjectId", message.projectId || "");
+            vscode.window.showInformationMessage("Project changed.");
+          }
+        } else if (message.type === "loadTemplate") {
+          if (message.name) {
+            const templates = getTemplates(context);
+            const template = templates.find(t => t.name === message.name);
+            if (template && template.description) {
+              // TODO: Load template into timer
+              vscode.window.showInformationMessage("Loaded template: " + message.name);
+            }
+          }
+        } else if (message.type === "setGoal") {
+          if (message.goal && message.goal > 0) {
+            await setDailyGoal(context, message.goal);
+          }
+        } else if (message.type === "loadEntry") {
+          // TODO: Load previous entry
+          vscode.window.showInformationMessage("Loading previous entry...");
         }
         updateStatusBar();
         updateSidebar();
@@ -763,6 +1419,12 @@ function activate(context) {
       await stopTimer(context);
       updateStatusBar();
     })
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("clockify.dailySummary", () => showDailySummary(context))
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("clockify.timeEntryHistory", () => showTimeEntryHistory(context))
   );
   context.subscriptions.push(
     vscode.commands.registerCommand("clockify.setApiKey", () => setApiKey(context))

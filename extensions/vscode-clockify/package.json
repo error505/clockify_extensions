@@ -11,12 +11,7 @@
     "Other"
   ],
   "activationEvents": [
-    "onCommand:clockify.startTimer",
-    "onCommand:clockify.stopTimer",
-    "onCommand:clockify.setApiKey",
-    "onCommand:clockify.openSettings",
-    "onView:clockifyView",
-    "onView:clockifyViewSecondary"
+    "*"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -39,12 +34,14 @@
     "views": {
       "clockify": [
         {
+          "type": "webview",
           "id": "clockifyView",
           "name": "Clockify"
         }
       ],
       "clockifySecondary": [
         {
+          "type": "webview",
           "id": "clockifyViewSecondary",
           "name": "Clockify"
         }
@@ -53,11 +50,19 @@
     "commands": [
       {
         "command": "clockify.startTimer",
-        "title": "Clockify: Start Timer for Issue"
+        "title": "Start timer"
       },
       {
         "command": "clockify.stopTimer",
-        "title": "Clockify: Stop Timer"
+        "title": "Stop timer"
+      },
+      {
+        "command": "clockify.dailySummary",
+        "title": "Clockify: Show Daily/Weekly Summary"
+      },
+      {
+        "command": "clockify.timeEntryHistory",
+        "title": "Clockify: Resume from History"
       },
       {
         "command": "clockify.setApiKey",
@@ -97,6 +102,14 @@
         {
           "command": "clockify.stopTimer",
           "group": "navigation@10"
+        },
+        {
+          "command": "clockify.dailySummary",
+          "group": "navigation@11"
+        },
+        {
+          "command": "clockify.timeEntryHistory",
+          "group": "navigation@12"
         }
       ],
       "view/item/context": []
