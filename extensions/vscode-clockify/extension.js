@@ -199,10 +199,26 @@ async function calculateTodaysTotal(apiKey, workspaceId, userId) {
     const now = new Date();
     const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
+    console.log("Fetching today's entries from", startOfDay.toISOString(), "to", endOfDay.toISOString());
     const entries = await fetchUserTimeEntries(apiKey, workspaceId, userId, startOfDay.toISOString(), endOfDay.toISOString());
+    console.log("Fetched", entries?.length || 0, "entries for today");
     if (!Array.isArray(entries)) return 0;
-    const totalSeconds = entries.reduce((sum, entry) => sum + (entry.timeInterval.duration || 0), 0);
-    return Math.round(totalSeconds / 3600 * 100) / 100; // Convert to hours
+    const totalSeconds = entries.reduce((sum, entry) => {
+      if (!entry.timeInterval) return sum;
+      // Handle duration as string or number
+      let duration = entry.timeInterval.duration;
+      if (typeof duration === 'string') duration = parseInt(duration, 10) || 0;
+      // If entry is running (no duration), calculate from start time
+      if (!duration && entry.timeInterval.start && !entry.timeInterval.end) {
+        const startMs = Date.parse(entry.timeInterval.start);
+        duration = Math.floor((Date.now() - startMs) / 1000);
+      }
+      console.log("Entry duration:", duration, "seconds");
+      return sum + (duration || 0);
+    }, 0);
+    const hours = Math.round(totalSeconds / 3600 * 100) / 100;
+    console.log("Total hours today:", hours);
+    return hours; // Convert to hours
   } catch (error) {
     console.error("Error calculating today's total:", error);
     return 0;
@@ -1137,7 +1153,7 @@ function getWebviewHtml() {
     </div>
     <div class="info-row">
       <div class="info-item"><div class="label">Workspace</div><div><select id="workspaceSelect"><option>Not set</option></select></div></div>
-      <div class="info-item"><div class="label">Project</div><div><select id="projectSelect"><option>None</option></select></div></div>
+      <div class="info-item"><div class="label">Project</div><div style="display: flex; gap: 4px;"><select id="projectSelect" style="flex: 1;"><option>None</option></select><button id="createProjectBtn" class="secondary" style="padding: 8px 6px;">+</button></div></div>
     </div>
     <div class="info-row">
       <div class="info-item"><div class="label">Task</div><div style="display: flex; gap: 4px;"><select id="taskSelect" style="flex: 1;"><option value="">No task</option></select><button id="createTaskBtn" class="secondary" style="padding: 8px 6px;">+</button></div></div>
@@ -1252,6 +1268,12 @@ function getWebviewHtml() {
     if (createTaskBtn) {
       createTaskBtn.onclick = () => {
         vscode.postMessage({ type: 'requestTaskInput' });
+      };
+    }
+    const createProjectBtn = document.getElementById("createProjectBtn");
+    if (createProjectBtn) {
+      createProjectBtn.onclick = () => {
+        vscode.postMessage({ type: 'requestProjectInput' });
       };
     }
     document.getElementById("loadWeekView").onclick = () => vscode.postMessage({ type: "getWeekView" });
@@ -1463,6 +1485,7 @@ function activate(context) {
   context.subscriptions.push(statusBar);
   let statusInterval = null;
   let idleCheckInterval = null;
+  let syncInterval = null;
   const sidebarViews = new Map();
 
   const viewProvider = {
@@ -1542,6 +1565,8 @@ function activate(context) {
                 });
               }
               vscode.window.showInformationMessage("Clockify timer started.");
+              updateStatusBar();
+              updateSidebar();
             }
           } catch (error) {
             vscode.window.showErrorMessage(error.message || "Clockify start failed.");
@@ -1589,6 +1614,7 @@ function activate(context) {
         } else if (message.type === "taskChanged") {
           if (message.taskId !== undefined) {
             await context.globalState.update("clockify.lastTaskId", message.taskId || "");
+            updateSidebar();
           }
         } else if (message.type === "requestTaskInput") {
           const taskName = await vscode.window.showInputBox({
@@ -1598,6 +1624,15 @@ function activate(context) {
           });
           if (taskName) {
             webviewProvider.postMessage({ type: 'createTask', taskName });
+          }
+        } else if (message.type === "requestProjectInput") {
+          const projectName = await vscode.window.showInputBox({
+            prompt: "Enter new project name",
+            placeHolder: "Project name...",
+            ignoreFocusOut: true
+          });
+          if (projectName) {
+            webviewProvider.postMessage({ type: 'createProject', projectName });
           }
         } else if (message.type === "createTask") {
           if (message.taskName) {
@@ -1611,12 +1646,32 @@ function activate(context) {
                 const task = await clockifyRequest(apiKey, "POST", `/workspaces/${workspaceId}/projects/${projectId}/tasks`, {
                   name: message.taskName
                 });
-                vscode.window.showInformationMessage("Task created: " + message.taskName);
-                // Refresh sidebar to show new task
+                await context.globalState.update("clockify.lastTaskId", task.id);
+                vscode.window.showInformationMessage(`Task '${task.name}' created.`);
                 await updateSidebar();
               }
             } catch (error) {
               vscode.window.showErrorMessage(error.message || "Failed to create task.");
+            }
+          }
+        } else if (message.type === "createProject") {
+          if (message.projectName) {
+            try {
+              const apiKey = await getApiKey(context);
+              const workspaceId = context.globalState.get("clockify.lastWorkspaceId");
+              if (!apiKey || !workspaceId) {
+                vscode.window.showErrorMessage("Workspace must be selected to create a project.");
+              } else {
+                const project = await clockifyRequest(apiKey, "POST", `/workspaces/${workspaceId}/projects`, {
+                  name: message.projectName,
+                  isPublic: true
+                });
+                await context.globalState.update("clockify.lastProjectId", project.id);
+                vscode.window.showInformationMessage(`Project '${project.name}' created.`);
+                await updateSidebar();
+              }
+            } catch (error) {
+              vscode.window.showErrorMessage(error.message || "Failed to create project.");
             }
           }
         } else if (message.type === "loadTemplate") {
@@ -1688,8 +1743,14 @@ function activate(context) {
             console.error("Error fetching week view:", error);
           }
         } else if (message.type === "discardEntry") {
-          // Clear the form (handled by webview, just notify user)
-          vscode.window.showInformationMessage("Form cleared.");
+          // Stop timer if running, then clear form
+          const entryId = context.globalState.get("clockify.lastTimeEntryId");
+          if (entryId) {
+            await stopTimer(context);
+          }
+          // Clear form selections
+          await context.globalState.update("clockify.lastTaskId", "");
+          vscode.window.showInformationMessage("Timer stopped and form cleared.");
         }
         updateStatusBar();
         updateSidebar();
@@ -1808,6 +1869,30 @@ function activate(context) {
   );
 
   updateStatusBar();
+
+  // Start periodic sync check every 5 seconds to detect external timer changes
+  syncInterval = setInterval(async () => {
+    try {
+      const stateChanged = await syncTimerState(context);
+      if (stateChanged) {
+        console.log("Timer state changed externally, updating UI");
+        updateStatusBar();
+        updateSidebar();
+      }
+    } catch (error) {
+      console.warn("Sync interval error:", error);
+    }
+  }, 5000);
+
+  // Clean up sync interval on deactivation
+  context.subscriptions.push({
+    dispose: () => {
+      if (syncInterval) {
+        clearInterval(syncInterval);
+        syncInterval = null;
+      }
+    }
+  });
 }
 
 function deactivate() {}
