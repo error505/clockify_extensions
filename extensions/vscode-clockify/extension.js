@@ -771,6 +771,7 @@ async function buildSidebarState(context) {
   let dailyGoal = 8;
   let workspaces = [];
   let projects = [];
+  let tasks = [];
   let tags = [];
   let selectedWorkspaceId = null;
   let selectedProjectId = null;
@@ -790,6 +791,11 @@ async function buildSidebarState(context) {
           projects = Array.isArray(await fetchProjects(apiKey, selectedWorkspaceId)) ? await fetchProjects(apiKey, selectedWorkspaceId) : [];
           tags = Array.isArray(await fetchTags(apiKey, selectedWorkspaceId)) ? await fetchTags(apiKey, selectedWorkspaceId) : [];
           selectedProjectId = (repoSel && repoSel.projectId) || context.globalState.get("clockify.lastProjectId") || null;
+          
+          // Fetch tasks for selected project
+          if (selectedProjectId) {
+            tasks = Array.isArray(await fetchTasks(apiKey, selectedWorkspaceId, selectedProjectId)) ? await fetchTasks(apiKey, selectedWorkspaceId, selectedProjectId) : [];
+          }
 
           // Recent entries and today's total
           recentEntries = await fetchRecentEntries(apiKey, selectedWorkspaceId, user.id);
@@ -811,6 +817,7 @@ async function buildSidebarState(context) {
     branch: repoContext.branch,
     workspaces: workspaces.map(w => ({ id: w.id, name: w.name })),
     projects: projects.map(p => ({ id: p.id, name: p.name })),
+    tasks: tasks.map(t => ({ id: t.id, name: t.name })),
     tagsList: tags.map(t => ({ id: t.id, name: t.name })),
     workspace: selection ? selection.workspaceName || (workspaces.find(w => w.id === selectedWorkspaceId) || {}).name || "" : (workspaces.find(w => w.id === selectedWorkspaceId) || {}).name || "",
     project: selection ? selection.projectName || (projects.find(p => p.id === selectedProjectId) || {}).name || "" : (projects.find(p => p.id === selectedProjectId) || {}).name || "",
@@ -1080,7 +1087,10 @@ function getWebviewHtml() {
     <div class="info-row">
       <div class="info-item"><div class="label">Workspace</div><div><select id="workspaceSelect"><option>Not set</option></select></div></div>
       <div class="info-item"><div class="label">Project</div><div><select id="projectSelect"><option>None</option></select></div></div>
-      <div class="info-item"><div class="label">Tags</div><div id="tagsContainer">No tags</div></div>
+    </div>
+    <div class="info-row">
+      <div class="info-item"><div class="label">Task</div><div style="display: flex; gap: 4px;"><select id="taskSelect" style="flex: 1;"><option value="">No task</option></select><button id="createTaskBtn" class="secondary" style="padding: 8px 6px;">+</button></div></div>
+      <div class="info-item"><div class="label">Tags</div><div><select id="tagsSelect" multiple><option value="">No tags</option></select></div></div>
     </div>
     <div class="field">
       <label for="descriptionInput">Description</label>
@@ -1166,9 +1176,10 @@ function getWebviewHtml() {
       const description = document.getElementById("descriptionInput").value;
       const workspaceId = (document.getElementById("workspaceSelect") || {}).value || null;
       const projectId = (document.getElementById("projectSelect") || {}).value || null;
-      const selectedChips = Array.from(document.querySelectorAll('#tagsContainer .tag-chip.selected'));
-      const tagIds = selectedChips.map(c => c.dataset.id);
-      vscode.postMessage({ type: "startWithSelection", description, selection: { workspaceId, projectId, tagIds } });
+      const taskId = (document.getElementById("taskSelect") || {}).value || null;
+      const tagsSelect = document.getElementById("tagsSelect");
+      const tagIds = tagsSelect ? Array.from(tagsSelect.selectedOptions).map(o => o.value).filter(v => v !== "") : [];
+      vscode.postMessage({ type: "startWithSelection", description, selection: { workspaceId, projectId, taskId, tagIds } });
     };
     document.getElementById("stop").onclick = () => vscode.postMessage({ type: "stop" });
     document.getElementById("saveTemplate").onclick = () => {
@@ -1182,6 +1193,14 @@ function getWebviewHtml() {
     if (wsSel) wsSel.onchange = () => vscode.postMessage({ type: 'workspaceChanged', workspaceId: wsSel.value });
     const prSel = document.getElementById("projectSelect");
     if (prSel) prSel.onchange = () => vscode.postMessage({ type: 'projectChanged', projectId: prSel.value });
+    const taskSel = document.getElementById("taskSelect");
+    if (taskSel) taskSel.onchange = () => vscode.postMessage({ type: 'taskChanged', taskId: taskSel.value });
+    document.getElementById("createTaskBtn").onclick = () => {
+      const taskName = prompt("Enter new task name:");
+      if (taskName) {
+        vscode.postMessage({ type: 'createTask', taskName });
+      }
+    };
     document.getElementById("loadWeekView").onclick = () => vscode.postMessage({ type: "getWeekView" });
     document.getElementById("exportCsv").onclick = () => {
       const range = parseInt(document.getElementById("exportRange").value) || 7;
@@ -1289,24 +1308,48 @@ function getWebviewHtml() {
         }
       }
 
-      // Tags
-      const tagsContainer = document.getElementById('tagsContainer');
-      if (tagsContainer && Array.isArray(state.tagsList)) {
-        tagsContainer.innerHTML = '';
-        const row = document.createElement('div');
-        row.className = 'tags-row';
-        state.tagsList.forEach(t => {
-          const chip = document.createElement('span');
-          chip.className = 'tag-chip';
-          chip.textContent = t.name;
-          chip.dataset.id = t.id;
-          chip.title = t.name;
-          chip.onclick = () => {
-            chip.classList.toggle('selected');
-          };
-          row.appendChild(chip);
+      // Tasks
+      const taskSelect = document.getElementById("taskSelect");
+      if (taskSelect && Array.isArray(state.tasks)) {
+        const prevT = taskSelect.value;
+        taskSelect.innerHTML = "";
+        const emptyOpt = document.createElement("option");
+        emptyOpt.value = "";
+        emptyOpt.textContent = "No task";
+        taskSelect.appendChild(emptyOpt);
+        state.tasks.forEach(t => {
+          const opt = document.createElement("option");
+          opt.value = t.id;
+          opt.textContent = t.name;
+          taskSelect.appendChild(opt);
         });
-        tagsContainer.appendChild(row);
+        if (state.task) {
+          let sett = false;
+          for (const o of taskSelect.options) {
+            if (o.value === state.task || o.textContent === state.task) {
+              taskSelect.value = o.value;
+              sett = true;
+              break;
+            }
+          }
+          if (!sett && prevT) taskSelect.value = prevT;
+        }
+      }
+
+      // Tags dropdown
+      const tagsSelect = document.getElementById("tagsSelect");
+      if (tagsSelect && Array.isArray(state.tagsList)) {
+        tagsSelect.innerHTML = "";
+        const emptyOpt = document.createElement("option");
+        emptyOpt.value = "";
+        emptyOpt.textContent = "No tags";
+        tagsSelect.appendChild(emptyOpt);
+        state.tagsList.forEach(t => {
+          const opt = document.createElement("option");
+          opt.value = t.id;
+          opt.textContent = t.name;
+          tagsSelect.appendChild(opt);
+        });
       }
 
       // Recent entries
@@ -1401,6 +1444,7 @@ function activate(context) {
                 description: message.description || `Working on ${repoContext.repo}`
               };
               if (message.selection.projectId) body.projectId = message.selection.projectId;
+              if (message.selection.taskId) body.taskId = message.selection.taskId;
               if (Array.isArray(message.selection.tagIds) && message.selection.tagIds.length) body.tagIds = message.selection.tagIds;
               const entry = await clockifyRequest(apiKey, "POST", `/workspaces/${message.selection.workspaceId}/time-entries`, body);
               await context.globalState.update("clockify.lastTimeEntryId", entry.id || "running");
@@ -1414,6 +1458,8 @@ function activate(context) {
                   workspaceName: "",
                   projectId: message.selection.projectId || "",
                   projectName: "",
+                  taskId: message.selection.taskId || "",
+                  taskName: "",
                   tagIds: message.selection.tagIds || [],
                   tagNames: []
                 });
@@ -1462,6 +1508,28 @@ function activate(context) {
           if (message.projectId !== undefined) {
             await context.globalState.update("clockify.lastProjectId", message.projectId || "");
             vscode.window.showInformationMessage("Project changed.");
+          }
+        } else if (message.type === "taskChanged") {
+          if (message.taskId !== undefined) {
+            await context.globalState.update("clockify.lastTaskId", message.taskId || "");
+          }
+        } else if (message.type === "createTask") {
+          if (message.taskName) {
+            try {
+              const apiKey = await getApiKey(context);
+              const workspaceId = context.globalState.get("clockify.lastWorkspaceId");
+              const projectId = context.globalState.get("clockify.lastProjectId");
+              if (!apiKey || !workspaceId || !projectId) {
+                vscode.window.showErrorMessage("Workspace and project must be selected to create a task.");
+              } else {
+                const task = await clockifyRequest(apiKey, "POST", `/workspaces/${workspaceId}/projects/${projectId}/tasks`, {
+                  name: message.taskName
+                });
+                vscode.window.showInformationMessage("Task created: " + message.taskName);
+              }
+            } catch (error) {
+              vscode.window.showErrorMessage(error.message || "Failed to create task.");
+            }
           }
         } else if (message.type === "loadTemplate") {
           if (message.name) {
