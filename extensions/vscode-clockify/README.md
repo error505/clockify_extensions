@@ -1,7 +1,8 @@
 # VS Code Clockify Extension
 
 Start and stop Clockify timers based on your workspace context with interactive selection.
-
+![alt text](image.png)
+![alt text](image-1.png)
 ## Install
 1) In VS Code, open the Command Palette
 2) Run: "Developer: Install Extension from Location..."
