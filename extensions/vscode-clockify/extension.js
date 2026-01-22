@@ -723,6 +723,14 @@ function exportToCSV(entries, fileName = "timesheet.csv") {
   return csv;
 }
 
+function fetchRunningEntry(apiKey, workspaceId) {
+  return clockifyRequest(apiKey, "GET", `/workspaces/${workspaceId}/time-entries/status/in-progress`);
+}
+
+function fetchWorkspaceSettings(apiKey, workspaceId) {
+  return clockifyRequest(apiKey, "GET", `/workspaces/${workspaceId}/settings`);
+}
+
 async function getWeekEntries(apiKey, workspaceId, userId, daysBack = 7) {
   try {
     // Get current week (Monday to Sunday)
@@ -744,19 +752,62 @@ async function getWeekEntries(apiKey, workspaceId, userId, daysBack = 7) {
   }
 }
 
-async function setApiKey(context) {
-  const apiKey = await vscode.window.showInputBox({
-    prompt: "Enter Clockify API key",
-    password: true,
-    ignoreFocusOut: true
-  });
-  if (apiKey) {
-    await context.secrets.store("clockify.apiKey", apiKey);
-    vscode.window.showInformationMessage("Clockify API key saved.");
+async function syncTimerState(context) {
+  try {
+    const apiKey = await context.secrets.get("clockify.apiKey");
+    const workspaceId = await context.globalState.get("clockify.lastWorkspaceId");
+    const localEntryId = await context.globalState.get("clockify.lastTimeEntryId");
+    
+    if (!apiKey || !workspaceId || !localEntryId) {
+      return; // No active timer locally
+    }
+
+    // Check what's actually running on Clockify
+    const runningEntry = await fetchRunningEntry(apiKey, workspaceId);
+    
+    if (!runningEntry || !runningEntry.id) {
+      // Timer was stopped on Clockify but we think it's running locally
+      console.log("Timer stopped on Clockify, syncing local state");
+      await context.globalState.update("clockify.lastTimeEntryId", "");
+      await context.globalState.update("clockify.lastTimeEntryStart", "");
+      await context.globalState.update("clockify.lastTimeEntryUserId", "");
+      return true; // State changed, update UI
+    }
+    
+    if (runningEntry.id !== localEntryId) {
+      // Different timer is running (shouldn't happen but just in case)
+      console.log("Different timer running on Clockify, updating local state");
+      await context.globalState.update("clockify.lastTimeEntryId", runningEntry.id);
+      await context.globalState.update("clockify.lastTimeEntryStart", runningEntry.timeInterval?.start);
+      await context.globalState.update("clockify.lastTimeEntryUserId", runningEntry.userId);
+      return true; // State changed, update UI
+    }
+
+    return false; // State is in sync
+  } catch (error) {
+    console.warn("Error syncing timer state:", error);
+    return false;
   }
 }
 
+function setApiKey(context) {
+  (async () => {
+    const apiKey = await vscode.window.showInputBox({
+      prompt: "Enter Clockify API key",
+      password: true,
+      ignoreFocusOut: true
+    });
+    if (apiKey) {
+      await context.secrets.store("clockify.apiKey", apiKey);
+      vscode.window.showInformationMessage("Clockify API key saved.");
+    }
+  })();
+}
+
 async function buildSidebarState(context) {
+  // Sync with Clockify's actual state first
+  await syncTimerState(context);
+
   const repoContext = await getRepoContext();
   const selections = await getRepoSelections(context);
   const selection = repoContext.repo ? selections[repoContext.repo] : null;
@@ -1099,6 +1150,7 @@ function getWebviewHtml() {
     <div class="button-group">
       <button id="start">▶ Start</button>
       <button id="stop" disabled>⏹ Stop</button>
+      <button id="discard" class="secondary">🗑️ Discard</button>
     </div>
   </div>
 
@@ -1195,16 +1247,23 @@ function getWebviewHtml() {
     if (prSel) prSel.onchange = () => vscode.postMessage({ type: 'projectChanged', projectId: prSel.value });
     const taskSel = document.getElementById("taskSelect");
     if (taskSel) taskSel.onchange = () => vscode.postMessage({ type: 'taskChanged', taskId: taskSel.value });
-    document.getElementById("createTaskBtn").onclick = () => {
-      const taskName = prompt("Enter new task name:");
-      if (taskName) {
-        vscode.postMessage({ type: 'createTask', taskName });
-      }
-    };
+    
+    const createTaskBtn = document.getElementById("createTaskBtn");
+    if (createTaskBtn) {
+      createTaskBtn.onclick = () => {
+        vscode.postMessage({ type: 'requestTaskInput' });
+      };
+    }
     document.getElementById("loadWeekView").onclick = () => vscode.postMessage({ type: "getWeekView" });
     document.getElementById("exportCsv").onclick = () => {
       const range = parseInt(document.getElementById("exportRange").value) || 7;
       vscode.postMessage({ type: "exportTimesheet", daysBack: range });
+    };
+    document.getElementById("discard").onclick = () => {
+      document.getElementById("descriptionInput").value = "";
+      document.getElementById("taskSelect").value = "";
+      document.getElementById("tagsSelect").selectedIndex = 0;
+      vscode.postMessage({ type: "discardEntry" });
     };
 
     window.addEventListener("message", event => {
@@ -1437,6 +1496,24 @@ function activate(context) {
             } else if (!message.selection || !message.selection.workspaceId) {
               vscode.window.showErrorMessage("Workspace selection is required to start timer.");
             } else {
+              // Check workspace settings for mandatory fields
+              let settings = {};
+              try {
+                settings = await fetchWorkspaceSettings(apiKey, message.selection.workspaceId);
+              } catch (e) {
+                console.warn("Could not fetch workspace settings, proceeding without validation");
+              }
+
+              // Validate mandatory fields
+              if (settings.projectRequired && !message.selection.projectId) {
+                vscode.window.showErrorMessage("Project is mandatory in this workspace. Please select a project.");
+                return;
+              }
+              if (settings.taskRequired && !message.selection.taskId) {
+                vscode.window.showErrorMessage("Task is mandatory in this workspace. Please select a task.");
+                return;
+              }
+
               const repoContext = await getRepoContext();
               const startIso = new Date().toISOString();
               const body = {
@@ -1513,6 +1590,15 @@ function activate(context) {
           if (message.taskId !== undefined) {
             await context.globalState.update("clockify.lastTaskId", message.taskId || "");
           }
+        } else if (message.type === "requestTaskInput") {
+          const taskName = await vscode.window.showInputBox({
+            prompt: "Enter new task name",
+            placeHolder: "Task name...",
+            ignoreFocusOut: true
+          });
+          if (taskName) {
+            webviewProvider.postMessage({ type: 'createTask', taskName });
+          }
         } else if (message.type === "createTask") {
           if (message.taskName) {
             try {
@@ -1526,6 +1612,8 @@ function activate(context) {
                   name: message.taskName
                 });
                 vscode.window.showInformationMessage("Task created: " + message.taskName);
+                // Refresh sidebar to show new task
+                await updateSidebar();
               }
             } catch (error) {
               vscode.window.showErrorMessage(error.message || "Failed to create task.");
@@ -1599,6 +1687,9 @@ function activate(context) {
           } catch (error) {
             console.error("Error fetching week view:", error);
           }
+        } else if (message.type === "discardEntry") {
+          // Clear the form (handled by webview, just notify user)
+          vscode.window.showInformationMessage("Form cleared.");
         }
         updateStatusBar();
         updateSidebar();
@@ -1624,7 +1715,12 @@ function activate(context) {
     });
   }
 
-  function updateStatusBar() {
+  async function updateStatusBar() {
+    try {
+      await syncTimerState(context);
+    } catch (e) {
+      console.warn("Sync timer error:", e);
+    }
     const entryId = context.globalState.get("clockify.lastTimeEntryId");
     const entryStart = context.globalState.get("clockify.lastTimeEntryStart");
     if (entryId) {
@@ -1633,7 +1729,7 @@ function activate(context) {
       statusBar.tooltip = "Stop Clockify timer";
       statusBar.command = "clockify.stopTimer";
       if (!statusInterval) {
-        statusInterval = setInterval(updateStatusBar, 1000);
+        statusInterval = setInterval(() => updateStatusBar(), 1000);
       }
     } else {
       statusBar.text = "$(watch) Clockify: Idle";

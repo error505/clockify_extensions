@@ -16,10 +16,7 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:clockifyView",
-    "onView:clockifyViewSecondary",
-    "onCommand:clockify.startTimer",
-    "onCommand:clockify.stopTimer"
+    "onStartupFinished"
   ],
   "main": "./extension.js",
   "contributes": {
