@@ -5,6 +5,10 @@
   "version": "0.2.0",
   "publisher": "igor-iric",
   "icon": "resources/clockify-logo.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/error505/clockify_extensions"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -12,7 +16,10 @@
     "Other"
   ],
   "activationEvents": [
-    "*"
+    "onView:clockifyView",
+    "onView:clockifyViewSecondary",
+    "onCommand:clockify.startTimer",
+    "onCommand:clockify.stopTimer"
   ],
   "main": "./extension.js",
   "contributes": {
