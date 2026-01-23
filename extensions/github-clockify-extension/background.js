@@ -374,12 +374,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!settings.apiKey) {
           throw new Error("Missing API key. Open settings.");
         }
-        const storage = await chrome.storage.sync.get({
-          lastTimeEntryWorkspaceId: "",
-          workspaceId: settings.workspaceId || ""
-        });
-        const workspaceId =
-          storage.lastTimeEntryWorkspaceId || storage.workspaceId || settings.workspaceId;
+        let workspaceId = settings.workspaceId;
+        
+        // If no workspace ID is stored, fetch the first workspace
+        if (!workspaceId) {
+          try {
+            const workspaces = await fetchWorkspaces(settings.apiKey);
+            if (Array.isArray(workspaces) && workspaces.length > 0) {
+              workspaceId = workspaces[0].id;
+              // Cache it for future use
+              await chrome.storage.sync.set({ workspaceId });
+            }
+          } catch (e) {
+            // Continue without caching
+          }
+        }
+        
         if (!workspaceId) {
           throw new Error("Workspace is required.");
         }
@@ -400,5 +410,106 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "OPEN_OPTIONS") {
     chrome.runtime.openOptionsPage();
     sendResponse({ ok: true });
+  }
+
+  if (message.type === "CREATE_PROJECT") {
+    getSettings()
+      .then((settings) => {
+        if (!settings.apiKey) {
+          throw new Error("Missing API key. Open settings.");
+        }
+        return fetch(`${API_BASE}/workspaces/${message.workspaceId}/projects`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Api-Key": settings.apiKey
+          },
+          body: JSON.stringify({ name: message.name })
+        }).then(async (res) => {
+          const text = await res.text();
+          if (!res.ok) {
+            throw new Error(`Clockify error ${res.status}: ${text}`);
+          }
+          return JSON.parse(text);
+        });
+      })
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "CREATE_TASK") {
+    getSettings()
+      .then((settings) => {
+        if (!settings.apiKey) {
+          throw new Error("Missing API key. Open settings.");
+        }
+        return fetch(`${API_BASE}/workspaces/${message.workspaceId}/projects/${message.projectId}/tasks`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Api-Key": settings.apiKey
+          },
+          body: JSON.stringify({ name: message.name })
+        }).then(async (res) => {
+          const text = await res.text();
+          if (!res.ok) {
+            throw new Error(`Clockify error ${res.status}: ${text}`);
+          }
+          return JSON.parse(text);
+        });
+      })
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "CREATE_TAG") {
+    getSettings()
+      .then((settings) => {
+        if (!settings.apiKey) {
+          throw new Error("Missing API key. Open settings.");
+        }
+        return fetch(`${API_BASE}/workspaces/${message.workspaceId}/tags`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Api-Key": settings.apiKey
+          },
+          body: JSON.stringify({ name: message.name })
+        }).then(async (res) => {
+          const text = await res.text();
+          if (!res.ok) {
+            throw new Error(`Clockify error ${res.status}: ${text}`);
+          }
+          return JSON.parse(text);
+        });
+      })
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "CHECK_TIMER_SYNC") {
+    getSettings()
+      .then(async (settings) => {
+        if (!settings.apiKey) {
+          throw new Error("Missing API key. Open settings.");
+        }
+        const storage = await chrome.storage.sync.get({
+          lastTimeEntryWorkspaceId: "",
+          workspaceId: settings.workspaceId || ""
+        });
+        const workspaceId =
+          storage.lastTimeEntryWorkspaceId || storage.workspaceId || settings.workspaceId;
+        if (!workspaceId) {
+          throw new Error("Workspace is required.");
+        }
+        const runningEntry = await fetchRunningEntry(settings.apiKey, workspaceId);
+        return { hasRunning: !!runningEntry };
+      })
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
   }
 });

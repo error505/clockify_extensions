@@ -1,20 +1,44 @@
 {
   "manifest_version": 3,
-  "name": "GitHub Clockify Starter",
+  "name": "Clockify - GitHub Time Tracking",
+  "short_name": "Clockify",
   "version": "0.1.0",
-  "description": "Start Clockify timers from GitHub issues and PRs.",
+  "description": "Start and manage Clockify timers directly from GitHub issues and pull requests with searchable project/task/tag selection.",
+  "author": "Igor Iric",
+  "homepage_url": "https://error505.com",
+
   "permissions": ["storage", "scripting"],
   "host_permissions": [
     "https://github.com/*",
     "https://api.clockify.me/*"
   ],
-  "background": { "service_worker": "background.js" },
+
+  "icons": {
+    "16": "assets/clockify_github.png",
+    "48": "assets/clockify_github.png",
+    "128": "assets/clockify_github.png"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Clockify - Time Tracking",
+    "default_icon": "assets/clockify_github.png"
+  },
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
   "content_scripts": [
     {
       "matches": ["https://github.com/*"],
       "js": ["content.js"]
     }
   ],
-  "action": { "default_popup": "popup.html", "default_title": "Clockify" },
-  "options_page": "options.html"
+
+  "options_page": "options.html",
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
 }

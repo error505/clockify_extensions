@@ -207,6 +207,120 @@ function insertButton() {
         width: auto;
         margin: 0;
       }
+      .clockify-modal .field-group {
+        position: relative;
+      }
+      .clockify-modal .searchable-dropdown {
+        position: relative;
+      }
+      .clockify-modal .dropdown-label-row {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        margin-bottom: 6px;
+      }
+      .clockify-modal .dropdown-label-row label {
+        margin: 0;
+        flex: 1;
+      }
+      .clockify-modal .btn-create-new {
+        padding: 4px 8px;
+        font-size: 11px;
+        background: #f0f6fc;
+        border: 1px solid #0969da;
+        color: #0969da;
+        cursor: pointer;
+        border-radius: 4px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .clockify-modal .btn-create-new:hover {
+        background: #f3f5ff;
+      }
+      .clockify-modal .btn-create-new:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      .clockify-modal .search-input {
+        padding: 8px 10px;
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+        font-size: 13px;
+        background: #ffffff;
+        color: #24292f;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .clockify-modal .search-input:focus {
+        outline: none;
+        border-color: #0969da;
+        box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.1);
+      }
+      .clockify-modal .dropdown-options {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: #ffffff;
+        border: 1px solid #d0d7de;
+        border-top: none;
+        border-radius: 0 0 6px 6px;
+        max-height: 200px;
+        overflow-y: auto;
+        z-index: 1000;
+        display: none;
+        margin-top: -1px;
+      }
+      .clockify-modal .dropdown-options.show {
+        display: block;
+      }
+      .clockify-modal .dropdown-option {
+        padding: 8px 10px;
+        cursor: pointer;
+        border-bottom: 1px solid #eaeef2;
+        font-size: 13px;
+        color: #24292f;
+      }
+      .clockify-modal .dropdown-option:last-child {
+        border-bottom: none;
+      }
+      .clockify-modal .dropdown-option:hover {
+        background: #f6f8fa;
+      }
+      .clockify-modal .dropdown-option.selected {
+        background: #f0f6fc;
+        color: #0969da;
+        font-weight: 600;
+      }
+      .clockify-modal .selected-items {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 6px;
+        padding: 8px;
+        background: #f6f8fa;
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+        min-height: 32px;
+      }
+      .clockify-modal .selected-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        background: #0969da;
+        color: #ffffff;
+        padding: 2px 6px;
+        border-radius: 3px;
+        font-size: 12px;
+      }
+      .clockify-modal .selected-tag .remove-tag {
+        cursor: pointer;
+        font-weight: bold;
+        margin-left: 2px;
+      }
+      .clockify-modal .selected-tag .remove-tag:hover {
+        opacity: 0.8;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -234,7 +348,13 @@ function insertButton() {
 
   const button = document.createElement("button");
   button.id = "clockify-start-btn";
-  button.textContent = "Start Clockify";
+  button.innerHTML = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:inline-block;margin-right:6px;vertical-align:middle;">
+      <circle cx="12" cy="12" r="10"></circle>
+      <polyline points="12 6 12 12 16 14"></polyline>
+    </svg>
+    Start Clockify
+  `;
 
   const stopButton = document.createElement("button");
   stopButton.id = "clockify-stop-btn";
@@ -323,6 +443,30 @@ function init() {
       updateHeaderStatus();
     }
   });
+
+  // Periodic check for running timers (every 30 seconds)
+  // This detects if a timer was started externally in Clockify
+  setInterval(async () => {
+    try {
+      const lastTimeEntryId = await getStorageValue("lastTimeEntryId", "");
+      if (!lastTimeEntryId) {
+        // No timer currently tracked locally, check if one is running in Clockify
+        const runningEntry = await fetchRunningEntryFromApi();
+        if (runningEntry && runningEntry.id) {
+          // A timer is running in Clockify but we don't know about it locally
+          await setStorageValue("lastTimeEntryId", runningEntry.id);
+          await setStorageValue("lastTimeEntryStart", runningEntry.timeInterval?.start || new Date().toISOString());
+          await setStorageValue("lastTimeEntryDescription", runningEntry.description || "Running");
+          await setStorageValue("lastTimeEntryWorkspaceId", runningEntry.workspaceId || "");
+          await setStorageValue("lastTimeEntryUserId", runningEntry.userId || "");
+          updateHeaderStatus();
+        }
+      }
+    } catch (error) {
+      // Silently fail - API might be unavailable or key might not be set
+      console.log("[Clockify] Timer check failed:", error.message);
+    }
+  }, 30000);
 
   let attempts = 0;
   const maxAttempts = 10;
@@ -424,6 +568,11 @@ async function updateHeaderStatus() {
     updateHeaderStatus.intervalId = null;
   }
 
+  if (updateHeaderStatus.syncCheckId) {
+    clearInterval(updateHeaderStatus.syncCheckId);
+    updateHeaderStatus.syncCheckId = null;
+  }
+
   if (lastTimeEntryId) {
     let startIso = lastTimeEntryStart;
     let description = lastTimeEntryDescription;
@@ -434,6 +583,15 @@ async function updateHeaderStatus() {
         description = apiEntry.description || description;
         await setStorageValue("lastTimeEntryStart", startIso);
         await setStorageValue("lastTimeEntryDescription", description);
+      } else if (!apiEntry) {
+        // Timer was stopped in Clockify but extension still thinks it's running
+        await setStorageValue("lastTimeEntryId", "");
+        await setStorageValue("lastTimeEntryStart", "");
+        await setStorageValue("lastTimeEntryDescription", "");
+        statusBadge.textContent = "Clockify: Idle";
+        statusBadge.title = "No timer running";
+        stopButton.style.display = "none";
+        return;
       }
       updateHeaderStatus.lastApiFetch = Date.now();
     }
@@ -447,6 +605,30 @@ async function updateHeaderStatus() {
     };
     updateElapsed();
     updateHeaderStatus.intervalId = setInterval(updateElapsed, 1000);
+    
+    // Check for timer sync every 10 seconds
+    updateHeaderStatus.syncCheckId = setInterval(async () => {
+      const apiEntry = await fetchRunningEntryFromApi();
+      if (!apiEntry) {
+        // Timer was stopped in Clockify
+        await setStorageValue("lastTimeEntryId", "");
+        await setStorageValue("lastTimeEntryStart", "");
+        await setStorageValue("lastTimeEntryDescription", "");
+        statusBadge.textContent = "Clockify: Idle";
+        statusBadge.title = "No timer running (synced from Clockify)";
+        stopButton.style.display = "none";
+        if (updateHeaderStatus.intervalId) {
+          clearInterval(updateHeaderStatus.intervalId);
+          updateHeaderStatus.intervalId = null;
+        }
+        if (updateHeaderStatus.syncCheckId) {
+          clearInterval(updateHeaderStatus.syncCheckId);
+          updateHeaderStatus.syncCheckId = null;
+        }
+      }
+      updateHeaderStatus.lastApiFetch = Date.now();
+    }, 10000);
+    
     stopButton.style.display = "inline-flex";
   } else {
     statusBadge.textContent = "Clockify: Idle";
@@ -524,26 +706,36 @@ async function openClockifyModal(context) {
         <label for="clockify-workspace">Workspace</label>
         <select id="clockify-workspace"></select>
       </div>
-      <div class="row">
-        <div>
-          <label for="clockify-project">Project</label>
-          <input class="search" id="clockify-project-search" type="text" placeholder="Search projects">
-          <select id="clockify-project" data-list="projects">
-            <option value="">No project</option>
-          </select>
+      <div class="field-group">
+        <div class="dropdown-label-row">
+          <label for="clockify-project-search">Project</label>
+          <button class="btn-create-new" id="clockify-new-project-btn" type="button" style="display:none;">+ New</button>
         </div>
-        <div>
-          <label for="clockify-task">Task</label>
-          <input class="search" id="clockify-task-search" type="text" placeholder="Search tasks">
-          <select id="clockify-task" data-list="tasks">
-            <option value="">No task</option>
-          </select>
+        <div class="searchable-dropdown" id="clockify-project-dropdown">
+          <input class="search-input" id="clockify-project-search" type="text" placeholder="Search projects...">
+          <div class="dropdown-options" id="clockify-project-options"></div>
         </div>
       </div>
-      <div>
-        <label for="clockify-tags">Tags</label>
-        <input class="search" id="clockify-tags-search" type="text" placeholder="Search tags">
-        <select id="clockify-tags" data-list="tags" multiple size="4"></select>
+      <div class="field-group">
+        <div class="dropdown-label-row">
+          <label for="clockify-task-search">Task</label>
+          <button class="btn-create-new" id="clockify-new-task-btn" type="button" style="display:none;">+ New</button>
+        </div>
+        <div class="searchable-dropdown" id="clockify-task-dropdown">
+          <input class="search-input" id="clockify-task-search" type="text" placeholder="Search tasks...">
+          <div class="dropdown-options" id="clockify-task-options"></div>
+        </div>
+      </div>
+      <div class="field-group">
+        <div class="dropdown-label-row">
+          <label for="clockify-tags-search">Tags</label>
+          <button class="btn-create-new" id="clockify-new-tag-btn" type="button" style="display:none;">+ New</button>
+        </div>
+        <div class="searchable-dropdown" id="clockify-tags-dropdown">
+          <input class="search-input" id="clockify-tags-search" type="text" placeholder="Search tags...">
+          <div class="dropdown-options" id="clockify-tags-options"></div>
+        </div>
+        <div class="selected-items" id="clockify-selected-tags"></div>
       </div>
       <div>
         <label for="clockify-description">Description</label>
@@ -556,6 +748,7 @@ async function openClockifyModal(context) {
       <div class="error" id="clockify-error"></div>
     </div>
     <div class="actions">
+      <button class="btn" id="clockify-discard">Discard</button>
       <button class="btn" id="clockify-cancel">Cancel</button>
       <button class="btn primary" id="clockify-start">Start timer</button>
     </div>
@@ -565,17 +758,30 @@ async function openClockifyModal(context) {
   document.body.appendChild(backdrop);
 
   const workspaceSelect = modal.querySelector("#clockify-workspace");
-  const projectSelect = modal.querySelector("#clockify-project");
-  const taskSelect = modal.querySelector("#clockify-task");
-  const tagsSelect = modal.querySelector("#clockify-tags");
   const projectSearch = modal.querySelector("#clockify-project-search");
+  const projectOptions = modal.querySelector("#clockify-project-options");
   const taskSearch = modal.querySelector("#clockify-task-search");
+  const taskOptions = modal.querySelector("#clockify-task-options");
   const tagsSearch = modal.querySelector("#clockify-tags-search");
+  const tagsOptions = modal.querySelector("#clockify-tags-options");
+  const selectedTagsContainer = modal.querySelector("#clockify-selected-tags");
   const descriptionField = modal.querySelector("#clockify-description");
   const quickStartToggle = modal.querySelector("#clockify-quick-start");
   const errorEl = modal.querySelector("#clockify-error");
   const startButton = modal.querySelector("#clockify-start");
   const cancelButton = modal.querySelector("#clockify-cancel");
+  const discardButton = modal.querySelector("#clockify-discard");
+  const newProjectBtn = modal.querySelector("#clockify-new-project-btn");
+  const newTaskBtn = modal.querySelector("#clockify-new-task-btn");
+  const newTagBtn = modal.querySelector("#clockify-new-tag-btn");
+
+  // State tracking
+  let selectedProjectId = "";
+  let selectedProjectName = "";
+  let selectedTaskId = "";
+  let selectedTaskName = "";
+  let selectedTagIds = [];
+  let selectedTagNames = [];
 
   descriptionField.value = `${context.title} (${context.url})`;
 
@@ -596,7 +802,27 @@ async function openClockifyModal(context) {
     backdrop.remove();
   }
 
+  function discardForm() {
+    projectSearch.value = "";
+    taskSearch.value = "";
+    tagsSearch.value = "";
+    descriptionField.value = `${context.title} (${context.url})`;
+    quickStartToggle.checked = Boolean(quickStartEnabled);
+    selectedProjectId = "";
+    selectedProjectName = "";
+    selectedTaskId = "";
+    selectedTaskName = "";
+    selectedTagIds = [];
+    selectedTagNames = [];
+    updateSelectedTags();
+    projectOptions.classList.remove("show");
+    taskOptions.classList.remove("show");
+    tagsOptions.classList.remove("show");
+    setError("");
+  }
+
   cancelButton.addEventListener("click", closeModal);
+  discardButton.addEventListener("click", discardForm);
   backdrop.addEventListener("click", (event) => {
     if (event.target === backdrop) {
       closeModal();
@@ -613,6 +839,11 @@ async function openClockifyModal(context) {
     if (isEnter && isMeta) {
       startButton.click();
     }
+    const isD = event.key === "d" || event.key === "D";
+    if (isD && isMeta) {
+      event.preventDefault();
+      discardForm();
+    }
   }
 
   document.addEventListener("keydown", handleKeydown);
@@ -621,14 +852,53 @@ async function openClockifyModal(context) {
     errorEl.textContent = message || "";
   }
 
-  function setSelectValue(selectEl, value) {
-    if (!value) {
-      return;
-    }
-    const match = Array.from(selectEl.options).find((opt) => opt.value === value);
-    if (match) {
-      selectEl.value = value;
-    }
+  function updateSelectedTags() {
+    selectedTagsContainer.innerHTML = selectedTagNames
+      .map((name, idx) => `
+        <div class="selected-tag">
+          ${name}
+          <span class="remove-tag" data-index="${idx}">×</span>
+        </div>
+      `)
+      .join("");
+    
+    selectedTagsContainer.querySelectorAll(".remove-tag").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const idx = parseInt(e.target.getAttribute("data-index"));
+        selectedTagIds.splice(idx, 1);
+        selectedTagNames.splice(idx, 1);
+        updateSelectedTags();
+      });
+    });
+  }
+
+  function renderDropdownOptions(search, items, optionsContainer, selectedId, onSelect) {
+    const query = normalizeName(search);
+    const filtered = query
+      ? items.filter((item) => normalizeName(item.name).includes(query))
+      : items;
+    
+    optionsContainer.innerHTML = filtered.length
+      ? filtered
+          .map(
+            (item) => `
+            <div class="dropdown-option ${item.id === selectedId ? "selected" : ""}" data-id="${item.id}" data-name="${item.name}">
+              ${item.name}
+            </div>
+          `
+          )
+          .join("")
+      : '<div style="padding: 8px 10px; color: #57606a; text-align: center;">No options</div>';
+
+    optionsContainer.querySelectorAll(".dropdown-option").forEach((opt) => {
+      opt.addEventListener("click", () => {
+        onSelect(opt.getAttribute("data-id"), opt.getAttribute("data-name"));
+        optionsContainer.classList.remove("show");
+        if (search === projectSearch.value) projectSearch.value = "";
+        if (search === taskSearch.value) taskSearch.value = "";
+        if (search === tagsSearch.value) tagsSearch.value = "";
+      });
+    });
   }
 
   async function loadWorkspaces() {
@@ -645,8 +915,9 @@ async function openClockifyModal(context) {
   async function loadProjects(workspaceId) {
     applySearchFilter.projects = [];
     applySearchFilter.tasks = [];
-    renderSelectOptions(projectSelect, [], true);
-    renderSelectOptions(taskSelect, [], true);
+    projectOptions.innerHTML = "";
+    taskOptions.innerHTML = "";
+    newProjectBtn.style.display = workspaceId ? "block" : "none";
     if (!workspaceId) {
       return;
     }
@@ -655,12 +926,12 @@ async function openClockifyModal(context) {
       throw new Error(response && response.error ? response.error : "Failed to load projects.");
     }
     applySearchFilter.projects = response.data;
-    renderSelectOptions(projectSelect, response.data, true);
   }
 
   async function loadTags(workspaceId) {
     applySearchFilter.tags = [];
-    renderSelectOptions(tagsSelect, [], false);
+    tagsOptions.innerHTML = "";
+    newTagBtn.style.display = workspaceId ? "block" : "none";
     if (!workspaceId) {
       return;
     }
@@ -669,12 +940,12 @@ async function openClockifyModal(context) {
       throw new Error(response && response.error ? response.error : "Failed to load tags.");
     }
     applySearchFilter.tags = response.data;
-    renderSelectOptions(tagsSelect, response.data, false);
   }
 
   async function loadTasks(workspaceId, projectId) {
     applySearchFilter.tasks = [];
-    renderSelectOptions(taskSelect, [], true);
+    taskOptions.innerHTML = "";
+    newTaskBtn.style.display = (workspaceId && projectId) ? "block" : "none";
     if (!workspaceId || !projectId) {
       return;
     }
@@ -687,8 +958,192 @@ async function openClockifyModal(context) {
       throw new Error(response && response.error ? response.error : "Failed to load tasks.");
     }
     applySearchFilter.tasks = response.data;
-    renderSelectOptions(taskSelect, response.data, true);
   }
+
+  newProjectBtn.addEventListener("click", async () => {
+    const name = projectSearch.value.trim();
+    if (!name) {
+      setError("Enter a project name");
+      return;
+    }
+    newProjectBtn.disabled = true;
+    newProjectBtn.textContent = "Creating...";
+    try {
+      const response = await sendMessage({
+        type: "CREATE_PROJECT",
+        workspaceId: workspaceSelect.value,
+        name
+      });
+      if (!response || !response.ok) {
+        throw new Error(response?.error || "Failed to create project.");
+      }
+      const newProject = response.data;
+      applySearchFilter.projects.push(newProject);
+      selectedProjectId = newProject.id;
+      selectedProjectName = newProject.name;
+      projectSearch.value = "";
+      projectOptions.classList.remove("show");
+      await loadTasks(workspaceSelect.value, newProject.id);
+      setError("");
+    } catch (error) {
+      setError(error.message);
+    } finally {
+      newProjectBtn.disabled = false;
+      newProjectBtn.textContent = "+ New";
+    }
+  });
+
+  newTaskBtn.addEventListener("click", async () => {
+    const name = taskSearch.value.trim();
+    if (!name) {
+      setError("Enter a task name");
+      return;
+    }
+    newTaskBtn.disabled = true;
+    newTaskBtn.textContent = "Creating...";
+    try {
+      const response = await sendMessage({
+        type: "CREATE_TASK",
+        workspaceId: workspaceSelect.value,
+        projectId: selectedProjectId,
+        name
+      });
+      if (!response || !response.ok) {
+        throw new Error(response?.error || "Failed to create task.");
+      }
+      const newTask = response.data;
+      applySearchFilter.tasks.push(newTask);
+      selectedTaskId = newTask.id;
+      selectedTaskName = newTask.name;
+      taskSearch.value = "";
+      taskOptions.classList.remove("show");
+      setError("");
+    } catch (error) {
+      setError(error.message);
+    } finally {
+      newTaskBtn.disabled = false;
+      newTaskBtn.textContent = "+ New";
+    }
+  });
+
+  newTagBtn.addEventListener("click", async () => {
+    const name = tagsSearch.value.trim();
+    if (!name) {
+      setError("Enter a tag name");
+      return;
+    }
+    newTagBtn.disabled = true;
+    newTagBtn.textContent = "Creating...";
+    try {
+      const response = await sendMessage({
+        type: "CREATE_TAG",
+        workspaceId: workspaceSelect.value,
+        name
+      });
+      if (!response || !response.ok) {
+        throw new Error(response?.error || "Failed to create tag.");
+      }
+      const newTag = response.data;
+      applySearchFilter.tags.push(newTag);
+      if (!selectedTagIds.includes(newTag.id)) {
+        selectedTagIds.push(newTag.id);
+        selectedTagNames.push(newTag.name);
+        updateSelectedTags();
+      }
+      tagsSearch.value = "";
+      tagsOptions.classList.remove("show");
+      setError("");
+    } catch (error) {
+      setError(error.message);
+    } finally {
+      newTagBtn.disabled = false;
+      newTagBtn.textContent = "+ New";
+    }
+  });
+
+  projectSearch.addEventListener("focus", () => {
+    renderDropdownOptions(projectSearch.value, applySearchFilter.projects, projectOptions, selectedProjectId, (id, name) => {
+      selectedProjectId = id;
+      selectedProjectName = name;
+      projectSearch.value = name;
+      selectedTaskId = "";
+      selectedTaskName = "";
+      taskSearch.value = "";
+      loadTasks(workspaceSelect.value, id);
+    });
+    projectOptions.classList.add("show");
+  });
+
+  projectSearch.addEventListener("input", () => {
+    renderDropdownOptions(projectSearch.value, applySearchFilter.projects, projectOptions, selectedProjectId, (id, name) => {
+      selectedProjectId = id;
+      selectedProjectName = name;
+      projectSearch.value = name;
+      selectedTaskId = "";
+      selectedTaskName = "";
+      taskSearch.value = "";
+      loadTasks(workspaceSelect.value, id);
+    });
+    projectOptions.classList.add("show");
+  });
+
+  projectSearch.addEventListener("blur", () => {
+    setTimeout(() => projectOptions.classList.remove("show"), 200);
+  });
+
+  taskSearch.addEventListener("focus", () => {
+    if (selectedProjectId) {
+      renderDropdownOptions(taskSearch.value, applySearchFilter.tasks, taskOptions, selectedTaskId, (id, name) => {
+        selectedTaskId = id;
+        selectedTaskName = name;
+        taskSearch.value = name;
+      });
+      taskOptions.classList.add("show");
+    }
+  });
+
+  taskSearch.addEventListener("input", () => {
+    if (selectedProjectId) {
+      renderDropdownOptions(taskSearch.value, applySearchFilter.tasks, taskOptions, selectedTaskId, (id, name) => {
+        selectedTaskId = id;
+        selectedTaskName = name;
+        taskSearch.value = name;
+      });
+      taskOptions.classList.add("show");
+    }
+  });
+
+  taskSearch.addEventListener("blur", () => {
+    setTimeout(() => taskOptions.classList.remove("show"), 200);
+  });
+
+  tagsSearch.addEventListener("focus", () => {
+    renderDropdownOptions(tagsSearch.value, applySearchFilter.tags, tagsOptions, null, (id, name) => {
+      if (!selectedTagIds.includes(id)) {
+        selectedTagIds.push(id);
+        selectedTagNames.push(name);
+        updateSelectedTags();
+      }
+      tagsSearch.value = "";
+    });
+    tagsOptions.classList.add("show");
+  });
+
+  tagsSearch.addEventListener("input", () => {
+    renderDropdownOptions(tagsSearch.value, applySearchFilter.tags, tagsOptions, null, (id, name) => {
+      if (!selectedTagIds.includes(id)) {
+        selectedTagIds.push(id);
+        selectedTagNames.push(name);
+        updateSelectedTags();
+      }
+      tagsSearch.value = "";
+    });
+    tagsOptions.classList.add("show");
+  });
+
+  tagsSearch.addEventListener("blur", () => {
+    setTimeout(() => tagsOptions.classList.remove("show"), 200);
+  });
 
   workspaceSelect.addEventListener("change", async () => {
     setError("");
@@ -696,45 +1151,50 @@ async function openClockifyModal(context) {
       await loadProjects(workspaceSelect.value);
       await loadTags(workspaceSelect.value);
       if (savedSelection) {
-        setSelectValue(projectSelect, savedSelection.projectId);
-        await loadTasks(workspaceSelect.value, projectSelect.value);
-        setSelectValue(taskSelect, savedSelection.taskId);
+        selectedProjectId = savedSelection.projectId || "";
+        selectedProjectName = savedSelection.projectName || "";
+        projectSearch.value = selectedProjectName;
+        await loadTasks(workspaceSelect.value, selectedProjectId);
+        selectedTaskId = savedSelection.taskId || "";
+        selectedTaskName = savedSelection.taskName || "";
+        taskSearch.value = selectedTaskName;
         if (Array.isArray(savedSelection.tagIds)) {
-          Array.from(tagsSelect.options).forEach((opt) => {
-            opt.selected = savedSelection.tagIds.includes(opt.value);
+          const tagMap = {};
+          applySearchFilter.tags.forEach(tag => {
+            tagMap[tag.id] = tag.name;
           });
+          selectedTagIds = savedSelection.tagIds.filter(id => tagMap[id]);
+          selectedTagNames = selectedTagIds.map(id => tagMap[id]);
+          updateSelectedTags();
         }
       } else {
-        selectTagsByLabels(tagsSelect, context.labels);
+        if (context.labels.length) {
+          const normalizedLabels = context.labels.map(normalizeName);
+          applySearchFilter.tags.forEach((tag) => {
+            if (normalizedLabels.includes(normalizeName(tag.name))) {
+              if (!selectedTagIds.includes(tag.id)) {
+                selectedTagIds.push(tag.id);
+                selectedTagNames.push(tag.name);
+              }
+            }
+          });
+          updateSelectedTags();
+        }
       }
     } catch (error) {
       setError(error.message);
     }
   });
 
-  projectSelect.addEventListener("change", async () => {
-    setError("");
-    try {
-      await loadTasks(workspaceSelect.value, projectSelect.value);
-    } catch (error) {
-      setError(error.message);
-    }
-  });
-
-  projectSearch.addEventListener("input", () => applySearchFilter(projectSearch, projectSelect));
-  taskSearch.addEventListener("input", () => applySearchFilter(taskSearch, taskSelect));
-  tagsSearch.addEventListener("input", () => applySearchFilter(tagsSearch, tagsSelect));
-
   startButton.addEventListener("click", async () => {
     setError("");
     startButton.textContent = "Starting...";
     startButton.disabled = true;
 
-    const selectedTagIds = Array.from(tagsSelect.selectedOptions).map((opt) => opt.value);
     const selection = {
       workspaceId: workspaceSelect.value,
-      projectId: projectSelect.value,
-      taskId: taskSelect.value,
+      projectId: selectedProjectId,
+      taskId: selectedTaskId,
       tagIds: selectedTagIds,
       description: descriptionField.value.trim()
     };
@@ -765,7 +1225,7 @@ async function openClockifyModal(context) {
   try {
     await loadWorkspaces();
     if (savedSelection) {
-      setSelectValue(workspaceSelect, savedSelection.workspaceId);
+      workspaceSelect.value = savedSelection.workspaceId;
     }
     if (!workspaceSelect.value && workspaceSelect.options.length === 1) {
       workspaceSelect.selectedIndex = 0;
@@ -774,16 +1234,35 @@ async function openClockifyModal(context) {
       await loadProjects(workspaceSelect.value);
       await loadTags(workspaceSelect.value);
       if (savedSelection) {
-        setSelectValue(projectSelect, savedSelection.projectId);
-        await loadTasks(workspaceSelect.value, projectSelect.value);
-        setSelectValue(taskSelect, savedSelection.taskId);
+        selectedProjectId = savedSelection.projectId || "";
+        selectedProjectName = savedSelection.projectName || "";
+        projectSearch.value = selectedProjectName;
+        await loadTasks(workspaceSelect.value, selectedProjectId);
+        selectedTaskId = savedSelection.taskId || "";
+        selectedTaskName = savedSelection.taskName || "";
+        taskSearch.value = selectedTaskName;
         if (Array.isArray(savedSelection.tagIds)) {
-          Array.from(tagsSelect.options).forEach((opt) => {
-            opt.selected = savedSelection.tagIds.includes(opt.value);
+          const tagMap = {};
+          applySearchFilter.tags.forEach(tag => {
+            tagMap[tag.id] = tag.name;
           });
+          selectedTagIds = savedSelection.tagIds.filter(id => tagMap[id]);
+          selectedTagNames = selectedTagIds.map(id => tagMap[id]);
+          updateSelectedTags();
         }
       } else {
-        selectTagsByLabels(tagsSelect, context.labels);
+        if (context.labels.length) {
+          const normalizedLabels = context.labels.map(normalizeName);
+          applySearchFilter.tags.forEach((tag) => {
+            if (normalizedLabels.includes(normalizeName(tag.name))) {
+              if (!selectedTagIds.includes(tag.id)) {
+                selectedTagIds.push(tag.id);
+                selectedTagNames.push(tag.name);
+              }
+            }
+          });
+          updateSelectedTags();
+        }
       }
     }
   } catch (error) {

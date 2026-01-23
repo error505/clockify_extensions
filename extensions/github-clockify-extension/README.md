@@ -1,34 +1,69 @@
-# GitHub Clockify Starter Extension
+# Clockify Browser Extension
 
-Chrome extension that adds Clockify controls to GitHub issue and PR pages.
+Chrome/Edge extension that adds Clockify timer controls directly to GitHub issue and PR pages.
 
-## Install (Chrome)
-1) Open `chrome://extensions`
-2) Enable Developer mode
-3) Click "Load unpacked" and select:
-   `C:\Users\iric_\OneDrive\Dokument\clockify_extensions\extensions\github-clockify-extension`
-4) Open the extension Options page and paste your Clockify API key
+## Installation
+
+### Edge Browser (Recommended)
+- Install directly from the **Edge Browser Marketplace**
+- Open the extension Options page and paste your Clockify API key
+
+### Chrome Browser
+- Install from the **Chrome Web Store** (when published)
+- Open the extension Options page and paste your Clockify API key
+![alt text](image-2.png)
 
 ## Features
-- Start/stop timers directly on GitHub issues and PRs
-- Modal picker for workspace, project, task, and tags
-- Searchable lists for projects, tasks, and tags
-- Remembers last selection per repo
-- Optional quick-start with last selection (skip modal)
-- Auto-match GitHub labels to Clockify tags
-- Header badge shows elapsed time with API-verified start time
+
+### Timer Management
+- **Start/Stop timers** directly on GitHub issues and PRs
+- **Automatic sync**: When you stop a timer in Clockify, the extension automatically stops as well
+- **Real-time display**: Header badge shows elapsed time with API-verified start time
+- **Quick-start**: Optional auto-start with your last selection (skip the modal)
+![alt text](image.png)
+
+### Smart Picker
+- **Single searchable field** for projects, tasks, and tags (no more switching between fields!)
+- **Create new items** on-the-fly:
+  - Add new tasks
+  - Create new projects
+  - Add new tags
+- **Auto-match labels**: Automatically apply Clockify tags based on GitHub issue labels
+- **Smart memory**: Remembers last selection per repository
+![alt text](image-1.png)
+
+### Configuration
+- **API Key**: Securely store your Clockify API key
+- **Label-to-tag mapping**: Map GitHub labels to Clockify tag IDs
+- **Quick-start toggle**: Enable/disable auto-start with last selection
+- **Default workspace, project, task, and tags**: Set workspace-wide defaults
 
 ## Usage
-- Click "Start Clockify" on an issue/PR
-- Use `Ctrl+Enter` (Windows/Linux) or `Cmd+Enter` (macOS) to start from the modal
-- Press `Esc` to close the modal
-- Use "Stop" in the header to end the running timer
 
-## Configuration
-- Options page:
-  - API Key
-  - Label-to-tag map (optional, tag IDs)
-  - Quick-start toggle
+### Starting a Timer
+1. Navigate to a GitHub issue or PR
+2. Click the **"Start Clockify"** button
+3. In the modal, select:
+   - Project (searchable)
+   - Task (searchable, optional)
+   - Tags (searchable, optional)
+4. Press `Ctrl+Enter` (Windows/Linux) or `Cmd+Enter` (macOS) to start
+5. Or press `Esc` to cancel
 
-## Auto-match
-- Label-to-tag map: map issue labels to Clockify tag IDs
+### Stopping a Timer
+- Click the **"Stop"** button in the header
+- Or stop the timer directly in Clockify—the extension will automatically sync
+
+### Creating New Items
+- While the modal is open, click **"+ New Task"**, **"+ New Project"**, or **"+ New Tag"** to create new items
+- New items are immediately available for selection
+
+## Keyboard Shortcuts
+- `Ctrl+Enter` / `Cmd+Enter`: Start timer from modal
+- `Esc`: Close modal and discard changes
+- `Ctrl+D` / `Cmd+D`: Quick discard (clears form)
+
+## Tips
+- Use the searchable fields to quickly find projects, tasks, and tags—just start typing!
+- Enable quick-start in settings to skip the modal for faster time tracking
+- Map GitHub labels to tags for automatic organization of time entries

@@ -3,7 +3,6 @@ const statusEl = document.getElementById("status");
 
 const fields = {
   apiKey: document.getElementById("apiKey"),
-  labelTagMap: document.getElementById("labelTagMap"),
   quickStartEnabled: document.getElementById("quickStartEnabled")
 };
 
@@ -11,7 +10,6 @@ function loadSettings() {
   chrome.storage.sync.get(
     {
       apiKey: "",
-      labelTagMap: "{}",
       quickStartEnabled: false
     },
     (settings) => {
@@ -26,33 +24,19 @@ function loadSettings() {
   );
 }
 
-function validateJson(value, fallback) {
-  if (!value.trim()) {
-    return fallback;
-  }
-  return JSON.parse(value);
-}
-
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   statusEl.textContent = "";
 
-  try {
-    validateJson(fields.labelTagMap.value, {});
-  } catch (error) {
-    statusEl.textContent = "Invalid JSON in one of the fields.";
-    return;
-  }
-
   const data = {
     apiKey: fields.apiKey.value.trim(),
-    labelTagMap: fields.labelTagMap.value.trim() || "{}",
     quickStartEnabled: fields.quickStartEnabled.checked,
     workspaceId: "",
     defaultProjectId: "",
     defaultTaskId: "",
     defaultTagIds: "[]",
-    repoMappings: "[]"
+    repoMappings: "[]",
+    labelTagMap: "{}"
   };
 
   chrome.storage.sync.set(data, () => {
