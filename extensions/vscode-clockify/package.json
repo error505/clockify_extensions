@@ -2,7 +2,7 @@
   "name": "vscode-clockify",
   "displayName": "Clockify Pro",
   "description": "Advanced Clockify timer management with idle detection, timesheet export (CSV/PDF), calendar week view, templates, and time entry history.",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "publisher": "IgorIric",
   "icon": "resources/clockify-logo.png",
   "repository": {
