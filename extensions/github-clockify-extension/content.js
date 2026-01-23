@@ -433,16 +433,44 @@ function insertButton() {
 }
 
 function init() {
+  console.log("[Clockify] Content script loaded - initializing");
   document.documentElement.setAttribute("data-clockify-extension", "loaded");
   insertButton();
   const observer = new MutationObserver(() => insertButton());
   observer.observe(document.body, { childList: true, subtree: true });
 
   chrome.storage.onChanged.addListener((changes) => {
+    console.log("[Clockify] Storage changed:", Object.keys(changes));
     if (changes.lastTimeEntryId || changes.lastTimeEntryStart) {
+      console.log("[Clockify] Timer-related storage changed, updating UI");
       updateHeaderStatus();
     }
   });
+
+  // Immediate check for running timers on page load
+  setTimeout(async () => {
+    try {
+      console.log("[Clockify] Starting initial timer check...");
+      const lastTimeEntryId = await getStorageValue("lastTimeEntryId", "");
+      console.log("[Clockify] Last time entry ID:", lastTimeEntryId || "none");
+      if (!lastTimeEntryId) {
+        console.log("[Clockify] No local timer, checking API...");
+        const runningEntry = await fetchRunningEntryFromApi();
+        console.log("[Clockify] API response:", runningEntry);
+        if (runningEntry && runningEntry.id) {
+          console.log("[Clockify] Found running timer on page load:", runningEntry.id);
+          await setStorageValue("lastTimeEntryId", runningEntry.id);
+          await setStorageValue("lastTimeEntryStart", runningEntry.timeInterval?.start || new Date().toISOString());
+          await setStorageValue("lastTimeEntryDescription", runningEntry.description || "Running");
+          await setStorageValue("lastTimeEntryWorkspaceId", runningEntry.workspaceId || "");
+          await setStorageValue("lastTimeEntryUserId", runningEntry.userId || "");
+          updateHeaderStatus();
+        }
+      }
+    } catch (error) {
+      console.log("[Clockify] Initial timer check failed:", error.message);
+    }
+  }, 2000);
 
   // Periodic check for running timers (every 30 seconds)
   // This detects if a timer was started externally in Clockify
@@ -454,6 +482,7 @@ function init() {
         const runningEntry = await fetchRunningEntryFromApi();
         if (runningEntry && runningEntry.id) {
           // A timer is running in Clockify but we don't know about it locally
+          console.log("[Clockify] Found running timer in periodic check:", runningEntry.id);
           await setStorageValue("lastTimeEntryId", runningEntry.id);
           await setStorageValue("lastTimeEntryStart", runningEntry.timeInterval?.start || new Date().toISOString());
           await setStorageValue("lastTimeEntryDescription", runningEntry.description || "Running");
@@ -553,45 +582,67 @@ async function fetchRunningEntryFromApi() {
 }
 
 async function updateHeaderStatus() {
+  // Prevent concurrent execution - if already running, skip
+  if (updateHeaderStatus.isRunning) {
+    console.log("[Clockify] updateHeaderStatus already running, skipping");
+    return;
+  }
+  updateHeaderStatus.isRunning = true;
+  
+  console.log("[Clockify] updateHeaderStatus called");
   const lastTimeEntryId = await getStorageValue("lastTimeEntryId", "");
   const lastTimeEntryStart = await getStorageValue("lastTimeEntryStart", "");
   const lastTimeEntryDescription = await getStorageValue("lastTimeEntryDescription", "");
+  console.log("[Clockify] Storage state - ID:", lastTimeEntryId ? "present" : "empty", "Start:", lastTimeEntryStart ? "present" : "empty");
   const statusBadge = document.getElementById("clockify-status");
   const stopButton = document.getElementById("clockify-stop-btn");
 
   if (!statusBadge || !stopButton) {
+    updateHeaderStatus.isRunning = false;
     return;
   }
 
+  // Clear any existing intervals
   if (updateHeaderStatus.intervalId) {
+    console.log("[Clockify] Clearing existing elapsed time interval");
     clearInterval(updateHeaderStatus.intervalId);
     updateHeaderStatus.intervalId = null;
   }
 
   if (updateHeaderStatus.syncCheckId) {
+    console.log("[Clockify] Clearing existing sync check interval");
     clearInterval(updateHeaderStatus.syncCheckId);
     updateHeaderStatus.syncCheckId = null;
   }
 
-  if (lastTimeEntryId) {
+  if (lastTimeEntryId && lastTimeEntryStart) {
+    console.log("[Clockify] Timer is running - setting up UI updates");
     let startIso = lastTimeEntryStart;
     let description = lastTimeEntryDescription;
-    if (!updateHeaderStatus.lastApiFetch || Date.now() - updateHeaderStatus.lastApiFetch > 60000) {
-      const apiEntry = await fetchRunningEntryFromApi();
-      if (apiEntry && apiEntry.start) {
-        startIso = apiEntry.start;
-        description = apiEntry.description || description;
-        await setStorageValue("lastTimeEntryStart", startIso);
-        await setStorageValue("lastTimeEntryDescription", description);
-      } else if (!apiEntry) {
-        // Timer was stopped in Clockify but extension still thinks it's running
-        await setStorageValue("lastTimeEntryId", "");
-        await setStorageValue("lastTimeEntryStart", "");
-        await setStorageValue("lastTimeEntryDescription", "");
-        statusBadge.textContent = "Clockify: Idle";
-        statusBadge.title = "No timer running";
-        stopButton.style.display = "none";
-        return;
+    // Check API more frequently to detect when timer is stopped (every 5 seconds instead of 60)
+    if (!updateHeaderStatus.lastApiFetch || Date.now() - updateHeaderStatus.lastApiFetch > 5000) {
+      try {
+        const apiEntry = await fetchRunningEntryFromApi();
+        console.log("[Clockify] Initial API check - entry:", apiEntry ? `{id: ${apiEntry.id}}` : "null");
+        if (apiEntry && apiEntry.start) {
+          startIso = apiEntry.start;
+          description = apiEntry.description || description;
+          await setStorageValue("lastTimeEntryStart", startIso);
+          await setStorageValue("lastTimeEntryDescription", description);
+        } else if (!apiEntry) {
+          // Timer was stopped in Clockify but extension still thinks it's running
+          console.log("[Clockify] Timer stopped - clearing storage and UI");
+          await setStorageValue("lastTimeEntryId", "");
+          await setStorageValue("lastTimeEntryStart", "");
+          await setStorageValue("lastTimeEntryDescription", "");
+          statusBadge.textContent = "Clockify: Idle";
+          statusBadge.title = "No timer running";
+          stopButton.style.display = "none";
+          updateHeaderStatus.isRunning = false;
+          return;
+        }
+      } catch (error) {
+        console.error("[Clockify] API check error:", error);
       }
       updateHeaderStatus.lastApiFetch = Date.now();
     }
@@ -606,35 +657,67 @@ async function updateHeaderStatus() {
     updateElapsed();
     updateHeaderStatus.intervalId = setInterval(updateElapsed, 1000);
     
-    // Check for timer sync every 10 seconds
+    // Check for timer sync every 5 seconds (faster detection of stopped timers)
+    console.log("[Clockify] Setting up sync check interval");
     updateHeaderStatus.syncCheckId = setInterval(async () => {
-      const apiEntry = await fetchRunningEntryFromApi();
-      if (!apiEntry) {
-        // Timer was stopped in Clockify
-        await setStorageValue("lastTimeEntryId", "");
-        await setStorageValue("lastTimeEntryStart", "");
-        await setStorageValue("lastTimeEntryDescription", "");
-        statusBadge.textContent = "Clockify: Idle";
-        statusBadge.title = "No timer running (synced from Clockify)";
-        stopButton.style.display = "none";
-        if (updateHeaderStatus.intervalId) {
-          clearInterval(updateHeaderStatus.intervalId);
-          updateHeaderStatus.intervalId = null;
+      // Double-check that syncCheckId still exists (may have been cleared already)
+      if (!updateHeaderStatus.syncCheckId) return;
+      
+      try {
+        const apiEntry = await fetchRunningEntryFromApi();
+        console.log("[Clockify] Sync check - API entry:", apiEntry ? `{id: ${apiEntry.id}}` : "null");
+        if (!apiEntry) {
+          console.log("[Clockify] Timer stopped in Clockify - clearing storage and UI immediately");
+          // Timer was stopped in Clockify - update UI immediately, don't wait for storage events
+          statusBadge.textContent = "Clockify: Idle";
+          statusBadge.title = "No timer running (synced from Clockify)";
+          stopButton.style.display = "none";
+          if (updateHeaderStatus.intervalId) {
+            clearInterval(updateHeaderStatus.intervalId);
+            updateHeaderStatus.intervalId = null;
+          }
+          // Stop the sync check interval immediately - this is key!
+          if (updateHeaderStatus.syncCheckId) {
+            clearInterval(updateHeaderStatus.syncCheckId);
+            updateHeaderStatus.syncCheckId = null;
+            console.log("[Clockify] Sync check interval cleared");
+          }
+          // Clear storage after UI update
+          console.log("[Clockify] Clearing storage values");
+          await setStorageValue("lastTimeEntryId", "");
+          await setStorageValue("lastTimeEntryStart", "");
+          await setStorageValue("lastTimeEntryDescription", "");
+          console.log("[Clockify] Storage cleared - sync check stopped");
+          return;
         }
-        if (updateHeaderStatus.syncCheckId) {
-          clearInterval(updateHeaderStatus.syncCheckId);
-          updateHeaderStatus.syncCheckId = null;
+      } catch (error) {
+        // Handle extension context invalidated (happens on reload)
+        if (error.message && error.message.includes("Extension context invalidated")) {
+          console.log("[Clockify] Extension context invalidated - stopping sync check");
+          if (updateHeaderStatus.syncCheckId) {
+            clearInterval(updateHeaderStatus.syncCheckId);
+            updateHeaderStatus.syncCheckId = null;
+          }
+          if (updateHeaderStatus.intervalId) {
+            clearInterval(updateHeaderStatus.intervalId);
+            updateHeaderStatus.intervalId = null;
+          }
+          return;
         }
+        console.error("[Clockify] Sync check error:", error);
       }
       updateHeaderStatus.lastApiFetch = Date.now();
-    }, 10000);
+    }, 5000);
     
     stopButton.style.display = "inline-flex";
   } else {
+    console.log("[Clockify] No timer running - showing idle state");
     statusBadge.textContent = "Clockify: Idle";
     statusBadge.title = "No timer running";
     stopButton.style.display = "none";
   }
+  
+  updateHeaderStatus.isRunning = false;
 }
 
 function applySearchFilter(inputEl, selectEl) {
@@ -874,9 +957,10 @@ async function openClockifyModal(context) {
 
   function renderDropdownOptions(search, items, optionsContainer, selectedId, onSelect) {
     const query = normalizeName(search);
+    const itemsList = items || [];
     const filtered = query
-      ? items.filter((item) => normalizeName(item.name).includes(query))
-      : items;
+      ? itemsList.filter((item) => normalizeName(item.name).includes(query))
+      : itemsList;
     
     optionsContainer.innerHTML = filtered.length
       ? filtered

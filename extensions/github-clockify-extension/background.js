@@ -245,8 +245,31 @@ async function fetchTasks(apiKey, workspaceId, projectId) {
   return clockifyGet(`/workspaces/${workspaceId}/projects/${projectId}/tasks`, apiKey);
 }
 
-async function fetchRunningEntry(apiKey, workspaceId) {
-  return clockifyGet(`/workspaces/${workspaceId}/time-entries/status/in-progress`, apiKey);
+async function fetchCurrentUser(apiKey) {
+  const response = await clockifyGet(`/user`, apiKey);
+  return response;
+}
+
+async function fetchRunningEntry(apiKey, workspaceId, userId = null) {
+  try {
+    // If no userId provided, fetch current user
+    if (!userId) {
+      const user = await fetchCurrentUser(apiKey);
+      userId = user.id;
+    }
+    // Use the user endpoint instead of workspace endpoint (avoids 403 Forbidden)
+    const params = new URLSearchParams();
+    params.append("in-progress", "true");
+    params.append("page-size", "50");
+    const entries = await clockifyGet(
+      `/workspaces/${workspaceId}/user/${userId}/time-entries?${params.toString()}`,
+      apiKey
+    );
+    return Array.isArray(entries) && entries.length > 0 ? entries[0] : null;
+  } catch (error) {
+    console.error("[Clockify] fetchRunningEntry error:", error.message);
+    return null;
+  }
 }
 
 async function startTimerWithSelection(selection) {
@@ -393,10 +416,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!workspaceId) {
           throw new Error("Workspace is required.");
         }
-        return fetchRunningEntry(settings.apiKey, workspaceId);
+        // Get userId from storage if available
+        const storage = await chrome.storage.sync.get({
+          lastTimeEntryUserId: ""
+        });
+        const userId = storage.lastTimeEntryUserId || null;
+        const runningEntry = await fetchRunningEntry(settings.apiKey, workspaceId, userId);
+        console.log("[Clockify] Running entry response:", runningEntry);
+        return runningEntry;
       })
       .then((data) => sendResponse({ ok: true, data }))
-      .catch((error) => sendResponse({ ok: false, error: error.message }));
+      .catch((error) => {
+        console.error("[Clockify] FETCH_RUNNING_ENTRY error:", error.message);
+        sendResponse({ ok: false, error: error.message });
+      });
     return true;
   }
 
