@@ -16,6 +16,14 @@
     "Other"
   ],
   "activationEvents": [
+    "onView:clockifyView",
+    "onView:clockifyViewSecondary",
+    "onCommand:clockify.startTimer",
+    "onCommand:clockify.stopTimer",
+    "onCommand:clockify.dailySummary",
+    "onCommand:clockify.timeEntryHistory",
+    "onCommand:clockify.setApiKey",
+    "onCommand:clockify.openSettings",
     "onStartupFinished"
   ],
   "main": "./extension.js",

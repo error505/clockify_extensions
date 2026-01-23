@@ -4,6 +4,27 @@ const { exec } = require("child_process");
 
 const API_BASE = "https://api.clockify.me/api/v1";
 
+// Simple cache for API responses with TTL
+const apiCache = new Map();
+function getCacheKey(apiKey, path) {
+  return `${apiKey}:${path}`;
+}
+function getFromCache(apiKey, path) {
+  const key = getCacheKey(apiKey, path);
+  const cached = apiCache.get(key);
+  if (cached && cached.expires > Date.now()) {
+    console.log("[CACHE] Hit for:", path);
+    return cached.data;
+  }
+  if (cached) apiCache.delete(key);
+  return null;
+}
+function setCache(apiKey, path, data, ttlMs = 3000) {
+  const key = getCacheKey(apiKey, path);
+  apiCache.set(key, { data, expires: Date.now() + ttlMs });
+  console.log("[CACHE] Set for:", path, "TTL:", ttlMs);
+}
+
 function execPromise(command, cwd) {
   return new Promise((resolve, reject) => {
     exec(command, { cwd }, (error, stdout) => {
@@ -23,6 +44,35 @@ function parseRepoFromRemote(remoteUrl) {
   const cleaned = remoteUrl.replace(/\.git$/, "");
   const sshMatch = cleaned.match(/github.com[:/](.+\/[^/]+)$/i);
   return sshMatch ? sshMatch[1] : "";
+}
+
+// Parse ISO 8601 duration format (e.g., PT8H, PT3M, PT30S, PT1H30M)
+function parseIsoDuration(durationStr) {
+  if (!durationStr) return 0;
+  
+  // If it's already a number, return it as milliseconds
+  if (typeof durationStr === 'number') {
+    return durationStr;
+  }
+  
+  // Handle ISO 8601 duration format: PT[n]H[n]M[n]S
+  const iso8601Regex = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/;
+  const match = durationStr.match(iso8601Regex);
+  
+  if (!match) {
+    console.warn("[DURATION-PARSE] Could not parse ISO 8601 duration:", durationStr);
+    return 0;
+  }
+  
+  const hours = parseInt(match[1]) || 0;
+  const minutes = parseInt(match[2]) || 0;
+  const seconds = parseInt(match[3]) || 0;
+  
+  const totalSeconds = hours * 3600 + minutes * 60 + seconds;
+  const totalMilliseconds = totalSeconds * 1000;
+  
+  console.log("[DURATION-PARSE] ISO 8601 duration:", durationStr, "->", totalSeconds, "seconds ->", totalMilliseconds, "ms");
+  return totalMilliseconds;
 }
 
 async function getRepoContext() {
@@ -58,6 +108,10 @@ function clockifyRequest(apiKey, method, path, body) {
         data += chunk;
       });
       response.on("end", () => {
+        console.log(`[API] ${method} ${path} - Status: ${response.statusCode}, Response length: ${data.length}`);
+        if (data) {
+          console.log(`[API] Response data: ${data.substring(0, 500)}`);
+        }
         if (response.statusCode < 200 || response.statusCode >= 300) {
           reject(new Error(`Clockify error ${response.statusCode}: ${data}`));
           return;
@@ -196,28 +250,38 @@ async function calculateTodaysTotal(apiKey, workspaceId, userId) {
     const now = new Date();
     const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
-    console.log("Fetching today's entries from", startOfDay.toISOString(), "to", endOfDay.toISOString());
-    const entries = await fetchUserTimeEntries(apiKey, workspaceId, userId, startOfDay.toISOString(), endOfDay.toISOString());
-    console.log("Fetched", entries?.length || 0, "entries for today");
-    if (!Array.isArray(entries)) return 0;
-    const totalSeconds = entries.reduce((sum, entry) => {
-      if (!entry.timeInterval) return sum;
-      // Handle duration as string or number
-      let duration = entry.timeInterval.duration;
-      if (typeof duration === 'string') duration = parseInt(duration, 10) || 0;
-      // If entry is running (no duration), calculate from start time
-      if (!duration && entry.timeInterval.start && !entry.timeInterval.end) {
-        const startMs = Date.parse(entry.timeInterval.start);
-        duration = Math.floor((Date.now() - startMs) / 1000);
-      }
-      console.log("Entry duration:", duration, "seconds");
-      return sum + (duration || 0);
-    }, 0);
+    const startIso = startOfDay.toISOString();
+    const endIso = endOfDay.toISOString();
+    console.log("[TODAY-TOTAL] Fetching entries for", userId, "from", startIso, "to", endIso);
+    
+    const entries = await fetchUserTimeEntries(apiKey, workspaceId, userId, startIso, endIso);
+    console.log("[TODAY-TOTAL] Received entries:", entries ? entries.length : "null", "entries");
+    
+    if (!Array.isArray(entries)) {
+      console.log("[TODAY-TOTAL] ERROR: Response is not an array, type:", typeof entries, "value:", entries);
+      return 0;
+    }
+    
+    if (entries.length === 0) {
+      console.log("[TODAY-TOTAL] No entries found for today");
+      return 0;
+    }
+    
+    let totalSeconds = 0;
+    entries.forEach((entry, idx) => {
+      // duration is in ISO 8601 format (e.g., "PT8H", "PT3M")
+      const duration = entry.timeInterval?.duration || 0;
+      const durationMs = parseIsoDuration(duration);
+      const seconds = Math.floor(durationMs / 1000); // Convert ms to seconds
+      console.log("[TODAY-TOTAL] Entry", idx, ":", duration, "->", durationMs, "ms =", seconds, "seconds");
+      totalSeconds += seconds || 0;
+    });
+    
     const hours = Math.round(totalSeconds / 3600 * 100) / 100;
-    console.log("Total hours today:", hours);
-    return hours; // Convert to hours
+    console.log("[TODAY-TOTAL] Total: ", totalSeconds, "seconds =", hours, "hours");
+    return hours;
   } catch (error) {
-    console.error("Error calculating today's total:", error);
+    console.error("[TODAY-TOTAL] Error:", error);
     return 0;
   }
 }
@@ -594,7 +658,7 @@ async function showDailySummary(context) {
     const weekStart = getWeekStart();
     const now = new Date().toISOString();
     const weekEntries = await fetchUserTimeEntries(apiKey, workspaceId, userId, weekStart, now);
-
+    console.log("[SUMMARY] Fetched", todayEntries, "today entries and", weekEntries, "week entries");
     // Calculate totals
     const calculateTotal = (entries) => {
       return entries.reduce((sum, entry) => {
@@ -727,7 +791,7 @@ function exportToCSV(entries, fileName = "timesheet.csv") {
     new Date(e.timeInterval?.start).toLocaleDateString(),
     e.description || "(no description)",
     e.projectId || "(no project)",
-    ((e.timeInterval?.duration || 0) / 3600).toFixed(2),
+    ((parseIsoDuration(e.timeInterval?.duration) / 1000 / 3600).toFixed(2)),
     (e.tagIds || []).join("; ")
   ]);
   const csv = [headers, ...rows]
@@ -739,26 +803,15 @@ function exportToCSV(entries, fileName = "timesheet.csv") {
 async function fetchRunningEntry(apiKey, workspaceId, userId = null) {
   try {
     console.log("[FETCH-RUNNING] Fetching running entry");
-    // First try workspace-level endpoint (might fail with 403)
-    try {
-      const result = await clockifyRequest(apiKey, "GET", `/workspaces/${workspaceId}/time-entries/status/in-progress`);
-      console.log("[FETCH-RUNNING] Got entry from workspace endpoint");
-      return result;
-    } catch (workspaceError) {
-      if (workspaceError.message && workspaceError.message.includes("403")) {
-        console.log("[FETCH-RUNNING] Workspace endpoint denied (403), using user endpoint fallback");
-        // Fallback to user endpoint
-        if (!userId) {
-          const user = await fetchCurrentUser(apiKey);
-          userId = user.id;
-        }
-        const entries = await fetchUserTimeEntries(apiKey, workspaceId, userId, null, null, true);
-        const entry = Array.isArray(entries) && entries.length > 0 ? entries[0] : null;
-        console.log("[FETCH-RUNNING] Got entry from user endpoint:", entry?.id || "none");
-        return entry;
-      }
-      throw workspaceError;
+    // Use user endpoint (workspace endpoint returns 403 Forbidden)
+    if (!userId) {
+      const user = await fetchCurrentUser(apiKey);
+      userId = user.id;
     }
+    const entries = await fetchUserTimeEntries(apiKey, workspaceId, userId, null, null, true);
+    const entry = Array.isArray(entries) && entries.length > 0 ? entries[0] : null;
+    console.log("[FETCH-RUNNING] Got entry:", entry?.id || "none");
+    return entry;
   } catch (error) {
     console.warn("[FETCH-RUNNING] Failed to fetch running entry:", error.message);
     return null;
@@ -766,7 +819,22 @@ async function fetchRunningEntry(apiKey, workspaceId, userId = null) {
 }
 
 function fetchWorkspaceSettings(apiKey, workspaceId) {
-  return clockifyRequest(apiKey, "GET", `/workspaces/${workspaceId}/settings`);
+  // Check cache first (60 second TTL)
+  const cached = getFromCache(apiKey, `/workspaces/${workspaceId}/settings`);
+  if (cached) return Promise.resolve(cached);
+  
+  return clockifyRequest(apiKey, "GET", `/workspaces/${workspaceId}/settings`)
+    .then(result => {
+      setCache(apiKey, `/workspaces/${workspaceId}/settings`, result, 60000);
+      return result;
+    })
+    .catch(error => {
+      console.warn("[SETTINGS] Fetch failed, using defaults:", error.message);
+      // Return default settings if endpoint doesn't exist or fails
+      const defaults = { projectRequired: false, taskRequired: false };
+      setCache(apiKey, `/workspaces/${workspaceId}/settings`, defaults, 60000);
+      return defaults;
+    });
 }
 
 async function getWeekEntries(apiKey, workspaceId, userId, daysBack = 7) {
@@ -851,9 +919,8 @@ function setApiKey(context) {
 }
 
 async function buildSidebarState(context) {
-  // Sync with Clockify's actual state first
+  // NOTE: syncTimerState is called from the periodic interval, not here to avoid rate limiting
   console.log("[SIDEBAR] Building sidebar state");
-  await syncTimerState(context);
 
   const repoContext = await getRepoContext();
   const selections = await getRepoSelections(context);
@@ -878,7 +945,12 @@ async function buildSidebarState(context) {
     const apiKey = await context.secrets.get("clockify.apiKey");
     if (apiKey) {
       console.log("[SIDEBAR] API key found, fetching data");
-      const user = await fetchCurrentUser(apiKey);
+      // Try to get from cache first
+      let user = getFromCache(apiKey, "/user");
+      if (!user) {
+        user = await fetchCurrentUser(apiKey);
+        setCache(apiKey, "/user", user, 5000); // Cache for 5 seconds
+      }
       if (user && user.id) {
         console.log("[SIDEBAR] User found:", user.id);
         // Fetch workspaces and determine selected workspace
@@ -1561,12 +1633,15 @@ function activate(context) {
             } else if (!message.selection || !message.selection.workspaceId) {
               vscode.window.showErrorMessage("Workspace selection is required to start timer.");
             } else {
-              // Check workspace settings for mandatory fields
+              // Check workspace settings for mandatory fields (with 2 second timeout)
               let settings = {};
               try {
-                settings = await fetchWorkspaceSettings(apiKey, message.selection.workspaceId);
+                settings = await Promise.race([
+                  fetchWorkspaceSettings(apiKey, message.selection.workspaceId),
+                  new Promise((_, reject) => setTimeout(() => reject(new Error("Settings fetch timeout")), 2000))
+                ]);
               } catch (e) {
-                console.warn("Could not fetch workspace settings, proceeding without validation");
+                console.warn("Could not fetch workspace settings, proceeding without validation:", e.message);
               }
 
               // Validate mandatory fields
@@ -1799,9 +1874,12 @@ function activate(context) {
             entries.forEach(e => {
               const day = new Date(e.timeInterval?.start).toLocaleDateString();
               if (!byDay[day]) byDay[day] = [];
+              // Convert duration from ISO 8601 format to hours
+              const durationMs = parseIsoDuration(e.timeInterval?.duration);
+              const hours = (durationMs / 1000 / 3600).toFixed(2);
               byDay[day].push({
                 description: e.description || "(no description)",
-                duration: ((e.timeInterval?.duration || 0) / 3600).toFixed(2),
+                duration: hours,
                 start: new Date(e.timeInterval?.start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
               });
             });
@@ -1835,14 +1913,20 @@ function activate(context) {
     );
   });
 
+  let updateSidebarTimeout = null;
   async function updateSidebar() {
-    if (!sidebarViews.size) {
-      return;
+    if (updateSidebarTimeout) {
+      clearTimeout(updateSidebarTimeout);
     }
-    const state = await buildSidebarState(context);
-    sidebarViews.forEach((view) => {
-      view.webview.postMessage({ type: "state", ...state });
-    });
+    updateSidebarTimeout = setTimeout(async () => {
+      if (!sidebarViews.size) {
+        return;
+      }
+      const state = await buildSidebarState(context);
+      sidebarViews.forEach((view) => {
+        view.webview.postMessage({ type: "state", ...state });
+      });
+    }, 500); // Debounce for 500ms
   }
 
   async function updateStatusBar() {
